@@ -13,13 +13,14 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Flappy FPV">
+<link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icon.png">
 <link rel="icon" type="image/png" href="icon.png">
 <style>
   :root { color-scheme: dark; }
   html, body { margin: 0; padding: 0; background: #0a0c10; color: #cfd6e0; font-family: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace; overflow: hidden; overscroll-behavior: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; touch-action: manipulation; }
   body { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
-  #stage { position: relative; border-radius: 16px; overflow: hidden; background: #1b2b4d; }
+  #stage { position: relative; flex: none; border-radius: 16px; overflow: hidden; background: #1b2b4d; }
   #c { display: block; width: 100%; height: 100%; outline: none; cursor: pointer; touch-action: none; -webkit-tap-highlight-color: transparent; }
   #stage::after { content: ""; position: absolute; inset: 0; pointer-events: none; background: repeating-linear-gradient(to bottom, rgba(0,0,0,0) 0 2px, rgba(0,0,0,.10) 2px 3px); }
   #stage:focus-within { box-shadow: 0 0 0 2px #8ff0c8; }
@@ -35,7 +36,7 @@
 <div id="stage"><canvas id="c" tabindex="0" aria-label="Flappy FPV: fiber-optic drone game. Press space or tap to flap."></canvas></div>
 <div id="bar">
   <span class="kb-only"><kbd>space</kbd> interface command</span>
-  <span class="kb-only">click also flaps, m toggles sound</span>
+  <span class="kb-only">click also flaps, m toggles sound, p pauses</span>
   <span class="touch-only">tap the screen to flap</span>
   <button id="snd" type="button" tabindex="-1" aria-pressed="true">sound on</button>
 </div>
@@ -44,6 +45,7 @@
 'use strict';
 const canvas = document.getElementById('c');
 const stage = document.getElementById('stage');
+const bar = document.getElementById('bar');
 const sndBtn = document.getElementById('snd');
 const ctx = canvas.getContext('2d');
 
@@ -58,9 +60,17 @@ const KEY = TOUCH ? '[ TAP ]' : '[ SPACE ]';
 let H = H_MIN, GY = H - GROUND_H, VIG = null, scale = 1;
 
 function avail() {
+  // Space the game can actually use: the viewport minus the body's padding (which is the
+  // phone's safe area: notch / status bar at the top, home indicator at the bottom when the
+  // game is launched from the home screen) minus the control bar under the canvas.
+  const cs = getComputedStyle(document.body);
+  const padX = (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
+  const padY = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
   const vv = window.visualViewport;
-  const vw = vv ? vv.width : window.innerWidth, vh = vv ? vv.height : window.innerHeight;
-  return { w: Math.max(200, vw - 16), h: Math.max(200, vh - 64) };
+  const vw = (vv ? vv.width : window.innerWidth) - padX;
+  const vh = (vv ? vv.height : window.innerHeight) - padY;
+  const barH = bar.offsetHeight || 30;
+  return { w: Math.max(200, vw - 16), h: Math.max(200, vh - barH - 24) };
 }
 function pickH() {
   const a = avail();
@@ -137,7 +147,14 @@ function makeTrees(seed, span, minH, maxH, minW, maxW) {
 const FAR = makeTrees(7, 760, 26, 64, 16, 34);
 const NEAR = makeTrees(21, 760, 64, 140, 22, 46);
 
-let state = 'ready', score = 0, best = 0, t = 0;
+// Best score lives in localStorage so it survives closing the game. Wrapped in try/catch
+// because some browsers throw when storage is blocked (private mode, etc.).
+const BEST_KEY = 'flappy-fpv-best';
+function loadBest() { try { return Math.max(0, parseInt(localStorage.getItem(BEST_KEY), 10) || 0); } catch (e) { return 0; } }
+function saveBest(v) { try { localStorage.setItem(BEST_KEY, String(v)); } catch (e) {} }
+
+// state: 'ready' (title screen) -> 'play' -> 'dead' (crash screen); 'paused' sits between play frames
+let state = 'ready', score = 0, best = loadBest(), newBest = false, t = 0;
 let D, nets, fiber, parts, dist, speed, gap, gOff, f1, f2, cause, deadT, flash, shake, bat, fly;
 
 function mkNet(x) {
@@ -148,7 +165,7 @@ function reset() {
   D = { x: DX, y: H * 0.44, vy: 0, ang: 0 };
   nets = []; fiber = []; parts = [];
   dist = 0; score = 0; speed = SPEED0; gap = GAP0;
-  gOff = 0; f1 = 0; f2 = 0; cause = ''; deadT = 0; flash = 0; shake = 0; bat = 25.2; fly = 0;
+  gOff = 0; f1 = 0; f2 = 0; cause = ''; deadT = 0; flash = 0; shake = 0; bat = 25.2; fly = 0; newBest = false;
   let x = W + 160;
   for (let i = 0; i < 3; i++) { nets.push(mkNet(x)); x += SPACING; }
   for (let fx = -40; fx <= D.x; fx += 4) fiber.push({ x: fx, y: D.y + 12 });
@@ -156,7 +173,7 @@ function reset() {
 
 function layout() {
   const h = pickH();
-  if (h !== H && state !== 'play') { applyH(h); if (state === 'ready') reset(); }
+  if (h !== H && state !== 'play' && state !== 'paused') { applyH(h); if (state === 'ready') reset(); }
   fit();
 }
 applyH(pickH());
@@ -167,15 +184,21 @@ window.addEventListener('orientationchange', () => setTimeout(layout, 250));
 if (window.visualViewport) window.visualViewport.addEventListener('resize', layout);
 
 function flap() { D.vy = FLAP; D.ang = -0.5; tone(480, 0.09, 'square', 0.035, 760); }
+function pause() { if (state === 'play') state = 'paused'; }
 function command() {
   if (state === 'ready') { state = 'play'; tone(880, 0.05, 'square', 0.04); flap(); }
   else if (state === 'play') flap();
+  else if (state === 'paused') { state = 'play'; flap(); }  // resuming also flaps so you get a fighting chance
   else if (state === 'dead' && deadT > 0.7) { reset(); state = 'ready'; }
 }
 window.addEventListener('keydown', e => {
   if (e.code === 'Space' || e.key === ' ' || e.key === 'Spacebar') { e.preventDefault(); if (!e.repeat) command(); }
   else if (e.key === 'm' || e.key === 'M') sndBtn.click();
+  else if (e.key === 'p' || e.key === 'P' || e.key === 'Escape') { if (state === 'play') pause(); else if (state === 'paused') command(); }
 });
+// Pause when the game leaves the screen mid-flight: switching apps, a phone call, locking the screen.
+document.addEventListener('visibilitychange', () => { if (document.hidden) pause(); });
+window.addEventListener('blur', pause);
 canvas.addEventListener('pointerdown', e => { e.preventDefault(); canvas.focus({ preventScroll: true }); command(); });
 canvas.addEventListener('pointerup', unlockAudio);
 canvas.addEventListener('touchend', unlockAudio, { passive: true });
@@ -213,13 +236,16 @@ function boom(x, y) {
 }
 function die(why) {
   state = 'dead'; cause = why; deadT = 0; flash = 1; shake = 10;
-  best = Math.max(best, score);
+  newBest = score > best;
+  if (newBest) { best = score; saveBest(best); }
   boom(D.x, D.y);
   noise(0.7, 0.35); tone(160, 0.6, 'sawtooth', 0.07, 30);
+  try { if (navigator.vibrate) navigator.vibrate([70, 40, 140]); } catch (e) {}  // Android only; iOS ignores it
 }
 
 function update(dt) {
   t += dt;
+  if (state === 'paused') return;  // freeze the world; t keeps ticking so the props spin and text blinks
   if (state !== 'dead') {
     gOff = (gOff + speed * dt) % 42;
     f1 = (f1 + speed * 0.12 * dt) % FAR.span;
@@ -413,7 +439,7 @@ function drawParts() {
 }
 function drawOSD() {
   const blink = Math.floor(t * 2) % 2 === 0;
-  txt(state === 'play' ? 'ARMED' : (blink ? 'DISARMED' : ''), 14, 12, 12, 'left', state === 'play' ? '#8ff0c8' : '#ffb24d');
+  txt(state === 'play' ? 'ARMED' : state === 'paused' ? (blink ? 'PAUSED' : '') : (blink ? 'DISARMED' : ''), 14, 12, 12, 'left', state === 'play' ? '#8ff0c8' : '#ffb24d');
   txt(`FLY ${pad(Math.floor(fly / 60))}:${pad(Math.floor(fly % 60))}`, 14, 28, 12);
   txt('LINK  FIBER', W - 14, 12, 12, 'right', '#8ff0c8');
   txt(state === 'play' && blink ? 'REC \u2022' : 'REC', W - 14, 28, 12, 'right', state === 'play' ? '#ff5d5d' : '#f4f7fb');
@@ -422,10 +448,15 @@ function drawOSD() {
   txt(`FIBER ${String(Math.floor(dist / 12)).padStart(4, '0')}m`, 14, H - 18, 12);
   txt(`ALT ${String(Math.max(0, Math.round((GY - D.y) / 8))).padStart(3, ' ')}m`, W - 14, H - 34, 12, 'right');
   txt(`SPD ${String(Math.round(speed * 0.36)).padStart(3, ' ')}km/h`, W - 14, H - 18, 12, 'right');
-  if (state === 'play') txt(String(score), W / 2, 40, 40, 'center', '#ffffff', '500');
+  if (state === 'play' || state === 'paused') txt(String(score), W / 2, 40, 40, 'center', '#ffffff', '500');
+  if (state === 'paused') {
+    txt('PAUSED', W / 2, H * 0.36, 30, 'center', '#ffb24d', '500');
+    txt(`${KEY}  resume`, W / 2, H * 0.36 + 42, 14, 'center', blink ? '#ffd166' : '#ffffff');
+  }
   if (state === 'ready') {
     txt('FLAPPY FPV', W / 2, H * 0.15, 36, 'center', '#ffffff', '500');
     txt('fiber-optic one-way attack drone', W / 2, H * 0.15 + 48, 13, 'center', '#cfe0ff');
+    if (best > 0) txt(`best  ${best}`, W / 2, H * 0.15 + 72, 13, 'center', '#ffd166');
     txt(KEY, W / 2, H * 0.66, 20, 'center', blink ? '#ffd166' : '#ffffff', '500');
     txt(TOUCH ? 'interface command \u2014 tap to arm' : 'interface command \u2014 press to arm', W / 2, H * 0.66 + 30, 12, 'center', '#cfe0ff');
     if (!TOUCH) txt('click or tap works too', W / 2, H * 0.66 + 48, 11, 'center', '#9fb3d1');
@@ -438,7 +469,9 @@ function drawOSD() {
     txt(cause, W / 2, py + 50, 12, 'center', '#ffb4b4');
     txt('nets cleared', L, py + 84, 13, 'left', '#cfe0ff'); txt(String(score), Rr, py + 84, 13, 'right');
     txt('fiber paid out', L, py + 106, 13, 'left', '#cfe0ff'); txt(`${Math.floor(dist / 12)} m`, Rr, py + 106, 13, 'right');
-    txt('best', L, py + 128, 13, 'left', '#cfe0ff'); txt(String(best), Rr, py + 128, 13, 'right', '#ffd166');
+    if (newBest) txt('NEW BEST', L, py + 128, 13, 'left', blink ? '#ffd166' : '#ffffff', '500');
+    else txt('best', L, py + 128, 13, 'left', '#cfe0ff');
+    txt(String(best), Rr, py + 128, 13, 'right', '#ffd166');
     if (deadT > 0.7) txt(`${KEY}  re-arm`, W / 2, py + 162, 13, 'center', blink ? '#ffd166' : '#ffffff');
   }
 }
@@ -471,6 +504,13 @@ function frame(now) {
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
+
+// Offline support: sw.js caches the game's files so it opens with no signal.
+// Service workers only work over https (GitHub Pages) or localhost, so this is skipped when the
+// file is opened straight from disk.
+if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) {
+  window.addEventListener('load', () => { navigator.serviceWorker.register('./sw.js').catch(() => {}); });
+}
 })();
 </script>
 </body>
