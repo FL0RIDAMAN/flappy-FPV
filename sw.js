@@ -8,7 +8,7 @@
 // cache; the cache is only used when the network fails (offline) or takes too long. That way you
 // always see the newest version after you push an update, and never get stuck on a stale one.
 
-const CACHE = 'flappy-fpv-v2';
+const CACHE = 'flappy-fpv-v3';
 const ASSETS = [
   './',
   './index.html',

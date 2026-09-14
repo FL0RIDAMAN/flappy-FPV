@@ -103,7 +103,12 @@ applyTheme();
 let H = H_MIN, GY = H - GROUND_H, VIG = null, scale = 1;
 const lo = document.createElement('canvas');         // low-res buffer for the pixel theme
 const lctx = lo.getContext('2d');
-let sunCache = null, synthCache = null;               // synthwave backdrops, drawn once per size
+let sunCache = null, synthCache = null, cityCache = null, waterGrad = null, hazeGrad = null, hazeFor = '';               // synthwave backdrops, drawn once per size
+// the synthwave city loop: its length in far-layer units, each layer's speed as a fraction of course speed, strip geometry
+const CITY_P = 0.15, WATER_P = 0.22, NEAR_P = 0.35, CITY_BASE = 200, CITY_H = 216, HZ_UP = 50;
+// The landmarks are drawn in their own "art units"; CITY_S scales the whole far layer up to game units and shrinks
+// on short screens so the skyline never climbs into the flight path. CITY_LOOP is one lap of the world in game units.
+let CITY_S = 1.4, CITY_LOOP = 3400 * CITY_S;
 
 function avail() {
   // Space the game can actually use: the viewport minus the body's padding (which is the
@@ -128,7 +133,10 @@ function makeVig() {
   g.addColorStop(0, 'rgba(0,0,0,0)'); g.addColorStop(1, 'rgba(0,0,0,0.55)');
   return g;
 }
-function applyH(h) { H = h; GY = H - GROUND_H; VIG = makeVig(); lo.width = W / PX; lo.height = H / PX; sunCache = null; synthCache = null; }
+function applyH(h) {
+  H = h; GY = H - GROUND_H; VIG = makeVig(); lo.width = W / PX; lo.height = H / PX; sunCache = null; synthCache = null;
+  CITY_S = 1.4 * Math.min(1, Math.max(0.6, (H - GROUND_H - HZ_UP) / 760)); CITY_LOOP = 3400 * CITY_S; cityCache = null; waterGrad = null;
+}
 function fit() {
   const a = avail();
   const s = Math.max(0.3, Math.min(a.w / W, a.h / H));
@@ -136,6 +144,7 @@ function fit() {
   stage.style.height = Math.round(H * s) + 'px';
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   scale = s * dpr;
+  cityCache = null;   // the baked skyline is rendered at device resolution, so it follows the scale
   canvas.width = Math.round(W * scale);
   canvas.height = Math.round(H * scale);
 }
@@ -304,8 +313,7 @@ function makeTrees(seed, span, minH, maxH, minW, maxW) {
 }
 const FAR = makeTrees(7, 760, 26, 64, 16, 34);
 const NEAR = makeTrees(21, 760, 64, 140, 22, 46);
-// synthwave: far mountain ridge (closed loop so it tiles) and near palms
-const RIDGE = (() => { const r = rng(99), pts = [], n = 19; for (let i = 0; i < n; i++) pts.push({ x: i * 40, h: 25 + r() * 95 }); pts.push({ x: 760, h: pts[0].h }); return { pts, span: 760 }; })();
+// synthwave: near palms (the skyline lives in the city loop further down)
 const PALMS = (() => { const r = rng(5), a = []; let x = 10; while (x < 760) { a.push({ x, h: 70 + r() * 80, lean: (r() - 0.5) * 30, fr: 6 + Math.floor(r() * 3) }); x += 110 + r() * 120; } return { a, span: 760 }; })();
 const STARS = (() => { const r = rng(3), a = []; for (let i = 0; i < 70; i++) a.push({ x: r() * W, y: r() * 0.5, s: r() < 0.25 ? 2 : 1, ph: r() * 6.28 }); return a; })();
 
@@ -317,7 +325,7 @@ function saveBest(v) { try { localStorage.setItem(BEST_KEY, String(v)); } catch 
 // state: 'ready' (title screen) -> 'play' -> 'dead' (crash screen); 'paused' sits between play frames
 let state = 'ready', score = 0, best = loadBest(), newBest = false, t = 0;
 let readyGrace = 0;   // seconds left during which the menu ignores arm taps (so a crash-screen tap can't start a new round)
-let D, nets, fiber, parts, dist, speed, gap, gOff, gScroll, f1, f2, cause, deadT, flash, shake, bat, fly;
+let D, nets, fiber, parts, dist, speed, gap, gOff, gScroll, f1, f2, fc, cause, deadT, flash, shake, bat, fly;
 
 function mkNet(x) {
   const m = 52;
@@ -327,7 +335,7 @@ function reset() {
   D = { x: DX, y: H * 0.44, vy: 0, ang: 0 };
   nets = []; fiber = []; parts = [];
   dist = 0; score = 0; speed = SPEED0; gap = GAP0;
-  gOff = 0; gScroll = 0; f1 = 0; f2 = 0; cause = ''; deadT = 0; flash = 0; shake = 0; bat = 25.2; fly = 0; newBest = false;
+  gOff = 0; gScroll = 0; f1 = 0; f2 = 0; fc = Math.random() * CITY_LOOP; cause = ''; deadT = 0; flash = 0; shake = 0; bat = 25.2; fly = 0; newBest = false;
   let x = W + 160;
   for (let i = 0; i < 3; i++) { nets.push(mkNet(x)); x += SPACING; }
   for (let fx = -40; fx <= D.x; fx += 4) fiber.push({ x: fx, y: D.y + 12 });
@@ -428,6 +436,7 @@ function update(dt) {
     gScroll = (gScroll + speed * dt) % 10080;
     f1 = (f1 + speed * 0.12 * dt) % FAR.span;
     f2 = (f2 + speed * 0.35 * dt) % NEAR.span;
+    fc = (fc + speed * CITY_P * dt) % CITY_LOOP;
     for (const p of fiber) p.x -= speed * dt;
   }
   if (state === 'ready') {
@@ -516,25 +525,14 @@ function synthSky() {
   }
 }
 // Everything that never moves or animates is drawn once into offscreen canvases: the sky
-// gradient, the mountain ridge strip, each palm, and a tall net strip that segments are cut from.
+// gradient, each palm, and a tall net strip that segments are cut from. (The skyline has its own cache below.)
 function buildSynthCache() {
   const mk = (w, h) => { const c = document.createElement('canvas'); c.width = Math.ceil(w); c.height = Math.ceil(h); return c; };
   // sky
   const sky = mk(W, H), sc = sky.getContext('2d');
   const g = sc.createLinearGradient(0, 0, 0, GY);
-  g.addColorStop(0, SY.sky0); g.addColorStop(0.45, SY.sky1); g.addColorStop(0.82, SY.sky2); g.addColorStop(1, SY.sky3);
+  g.addColorStop(0, MV.sky0); g.addColorStop(0.4, MV.sky1); g.addColorStop(0.75, MV.sky2); g.addColorStop(0.93, MV.sky3); g.addColorStop(1, MV.glow);
   sc.fillStyle = g; sc.fillRect(0, 0, W, H);
-  // ridge strip (one period, rendered with the neighbouring points so the seams join)
-  const M = 24, RH = 140, ridge = mk(RIDGE.span + 2 * M, RH), rc = ridge.getContext('2d'), by = RH - 8;
-  const pts = RIDGE.pts, n = pts.length;
-  const ext = [{ x: pts[n - 2].x - RIDGE.span, h: pts[n - 2].h }, ...pts, { x: pts[1].x + RIDGE.span, h: pts[1].h }];
-  rc.beginPath(); rc.moveTo(M + ext[0].x, by + 8);
-  for (const p of ext) rc.lineTo(M + p.x, by - p.h);
-  rc.lineTo(M + ext[ext.length - 1].x, by + 8); rc.closePath();
-  rc.fillStyle = '#1a0838'; rc.fill();
-  rc.beginPath(); rc.moveTo(M + ext[0].x, by - ext[0].h);
-  for (const p of ext) rc.lineTo(M + p.x, by - p.h);
-  glowStroke(rc, SY.pink, 1.2, 6, 0.28);
   // palms
   const palms = PALMS.a.map(p => {
     const L = 24 + p.h * 0.2, w = L * 2 + 40, h = p.h + L + 30, c = mk(w, h), pc = c.getContext('2d');
@@ -550,10 +548,10 @@ function buildSynthCache() {
   nc.stroke(); nc.restore();
   nc.beginPath(); nc.moveTo(NM, 0); nc.lineTo(NM, H); nc.moveTo(NM + NET_W, 0); nc.lineTo(NM + NET_W, H);
   glowStroke(nc, SY.pink, 1.4, 6, 0.3);
-  synthCache = { sky, ridge, ridgeM: M, ridgeBy: by, palms, net, netM: NM };
+  synthCache = { sky, palms, net, netM: NM };
 }
 function synthSun() {
-  const R = 96, cx = W * 0.64, cy = GY - 62;
+  const R = 84, cx = W * 0.64, cy = GY - HZ_UP - 6;
   if (!sunCache) {
     // the striped sun never changes, so draw it once with the stripes cut out
     const c = document.createElement('canvas'); c.width = R * 2 + 4; c.height = R * 2 + 4;
@@ -567,14 +565,6 @@ function synthSun() {
   }
   ctx.globalAlpha = 0.25; ctx.fillStyle = '#ff2d95'; ctx.beginPath(); ctx.arc(cx, cy, R + 18, 0, Math.PI * 2); ctx.fill(); ctx.globalAlpha = 1;
   ctx.drawImage(sunCache.c, cx - R - 2, cy - R - 2);
-}
-function synthRidge(off, baseY) {
-  const { ridge, ridgeM, ridgeBy } = synthCache;
-  for (const rep of [0, 1]) {
-    const x0 = -off + rep * RIDGE.span;
-    if (x0 > W || x0 + RIDGE.span < 0) continue;
-    ctx.drawImage(ridge, ridgeM, 0, RIDGE.span, ridge.height, x0, baseY - ridgeBy, RIDGE.span, ridge.height);
-  }
 }
 function synthPalmDraw(c, x, baseY, p) {
   const top = { x: x + p.lean, y: baseY - p.h };
@@ -597,18 +587,6 @@ function synthPalms(off, baseY) {
     const x0 = -off + rep * PALMS.span;
     PALMS.a.forEach((p, i) => { const x = x0 + p.x; if (x > W + 80 || x < -80) return; const sp = synthCache.palms[i]; ctx.drawImage(sp.c, x + sp.dx, baseY + sp.dy); });
   }
-}
-function synthTower(x, baseY) {
-  const h = 150, top = baseY - h - 4;
-  ctx.beginPath(); ctx.moveTo(x - 7, baseY); ctx.lineTo(x, baseY - h); ctx.lineTo(x + 7, baseY);
-  for (let i = 1; i < 6; i++) { const y = baseY - h * i / 6, w = 7 * (1 - i / 6); ctx.moveTo(x - w, y); ctx.lineTo(x + w, y); }
-  glowStroke(ctx, SY.pink, 1, 4, 0.25);
-  for (let k = 0; k < 3; k++) {
-    const ph = (t * 0.55 + k / 3) % 1, r = 8 + ph * 70;
-    ctx.strokeStyle = `rgba(255,90,140,${(1 - ph) * 0.45})`; ctx.lineWidth = 1.5;
-    ctx.beginPath(); ctx.arc(x, top, r, 0, Math.PI * 2); ctx.stroke();
-  }
-  if (Math.floor(t * 2) % 2 === 0) { ctx.fillStyle = '#ff4d6d'; ctx.beginPath(); ctx.arc(x, top, 2.4, 0, Math.PI * 2); ctx.fill(); }
 }
 function synthNetSeg(x, y, w, h, top) {
   if (h <= 0) return;
@@ -736,9 +714,9 @@ function synthOSD() {
     stxt('fiber-optic one-way attack drone', W / 2, H * 0.15 + 52, 13, 'center', SY.dim);
     if (best > 0) stxt(`best  ${best}`, W / 2, H * 0.15 + 76, 13, 'center', SY.cyan);
     if (readyGrace <= 0) {
-      stxt(KEY, W / 2, H * 0.66, 20, 'center', blink ? SY.cyan : '#ffffff', '500');
-      stxt(TOUCH ? 'interface command — tap to arm' : 'interface command — press to arm', W / 2, H * 0.66 + 30, 12, 'center', SY.dim);
-      if (!TOUCH) stxt('click or tap works too', W / 2, H * 0.66 + 48, 11, 'center', SY.dim);
+      stxt(KEY, W / 2, H * 0.57, 20, 'center', blink ? SY.cyan : '#ffffff', '500');
+      stxt(TOUCH ? 'interface command — tap to arm' : 'interface command — press to arm', W / 2, H * 0.57 + 30, 12, 'center', SY.dim);
+      if (!TOUCH) stxt('click or tap works too', W / 2, H * 0.57 + 48, 11, 'center', SY.dim);
     }
   }
   if (bannerT > 0) { ctx.globalAlpha = Math.min(1, bannerT / 0.5); stxt(banner, W / 2, H * 0.31, 24, 'center', SY.cyan, '500'); ctx.globalAlpha = 1; }
@@ -756,15 +734,853 @@ function synthOSD() {
     if (deadT > 0.7) stxt(`${KEY}  re-arm`, W / 2, py + 162, 13, 'center', blink ? SY.cyan : '#ffffff');
   }
 }
+// =====================================================================
+//  THE CITY LOOP  (Miami Vice backdrop: Tampa and Miami landmarks, drawn once into strips)
+// =====================================================================
+const MV = { sky0: '#0b0530', sky1: '#3a0d6e', sky2: '#b0207c', sky3: '#ff5a8a', glow: '#ff9a5c', pink: '#ff4fb5', teal: '#3ee6d6', blue: '#4f9cff', green: '#5cf28a', yellow: '#ffe066', lav: '#c9b6ff', white: '#f4f0ff', red: '#ff3b5c', silver: '#e6e9f2', amber: '#ffb347', tan: '#ffcf8a', salmon: '#ff8c94', water0: '#0d2540', water1: '#071626', ground: '#0d0322', ink: '#0b0618' };
+let seed = 1; const rnd = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
+function rgba(hex, a) { const n = parseInt(hex.slice(1), 16); return `rgba(${n >> 16},${(n >> 8) & 255},${n & 255},${a})`; }
+// ---- neon-signage primitives ----
+function body(c, path, col, lw) { path(); c.fillStyle = MV.ink; c.fill(); glowStroke(c, col, lw || 1.1, 5, 0.3); }
+function outline(c, path, col, lw) { path(); glowStroke(c, col, lw || 1, 5, 0.3); }
+function trim(c, path, col, w, soft) { path(); glowStroke(c, col, w, w + 4, soft ? 0.2 : 0.4); }
+function accent(c, path, col) { path(); c.fillStyle = col; c.fill(); glowStroke(c, col, 0.8, 4, 0.3); }
+function lit(c, path, col, a, lw) { path(); c.fillStyle = rgba(col, a || 0.45); c.fill(); glowStroke(c, col, lw || 1, 6, 0.5); }
+// window grid: rows every sy, columns every sx, each dot lit with probability dens
+function wins(c, x, y, w, h, sx, sy, s, col, dens, dot) { seed = s; c.fillStyle = col; c.globalAlpha = 0.6; const d = dot || 1.5; for (let yy = y + 2.5; yy < y + h - 2; yy += sy) for (let xx = x + 2.2; xx < x + w - 2; xx += sx) if (rnd() < (dens || 0.5)) c.fillRect(xx, yy, d, d); c.globalAlpha = 1; }
+// window grid on a cylinder seen side-on: columns bunch up toward the edges
+function cylWins(c, x, y, w, h, n, sy, s, col, dens) { seed = s; c.fillStyle = col; const cx = x + w / 2, R = w / 2 - 1.2; for (let yy = y; yy < y + h; yy += sy) for (let k = 0; k < n; k++) { const th = (k + 0.5) / n * Math.PI, xx = cx - R * Math.cos(th), fade = 0.3 + 0.7 * Math.sin(th), dw = Math.max(0.5, 1.5 * Math.sin(th)); c.globalAlpha = (rnd() < dens ? 0.75 : 0.22) * fade; c.fillRect(xx - dw / 2, yy, dw, 1.5); } c.globalAlpha = 1; }
+// soft horizontal shading that makes a flat rectangle read as a cylinder
+function cylShade(c, x, y, w, h, col, a) { const g = c.createLinearGradient(x, 0, x + w, 0); g.addColorStop(0, rgba(col, 0)); g.addColorStop(0.3, rgba(col, a)); g.addColorStop(0.55, rgba(col, a * 0.7)); g.addColorStop(1, rgba(col, 0)); c.fillStyle = g; c.fillRect(x, y, w, h); }
+function bulbs(c, x0, y0, x1, y1, step, col, r) { const L = Math.hypot(x1 - x0, y1 - y0), n = Math.max(1, Math.round(L / step)); c.fillStyle = col; for (let k = 0; k <= n; k++) { const t = k / n, xx = x0 + (x1 - x0) * t, yy = y0 + (y1 - y0) * t; c.globalAlpha = k % 2 ? 0.55 : 1; c.beginPath(); c.arc(xx, yy, r || 0.55, 0, Math.PI * 2); c.fill(); } c.globalAlpha = 1; }
+function dot(c, x, y, r, col, a) { c.globalAlpha = a || 1; c.fillStyle = col; c.beginPath(); c.arc(x, y, r, 0, Math.PI * 2); c.fill(); c.globalAlpha = 1; }
+function sign(c, x, y, w, h, col) { rr(c, x, y, w, h, 1.2); c.fillStyle = MV.ink; c.fill(); glowStroke(c, col, 0.9, 5, 0.5); }
+function neonText(c, s, x, y, size, col, opt) { opt = opt || {}; c.font = (opt.weight || 'bold') + ' ' + size + 'px ' + (opt.font || MONO); c.textAlign = 'center'; c.textBaseline = 'middle'; c.lineJoin = 'round'; const put = (fn) => opt.vertical ? s.split('').forEach((ch, i) => fn(ch, x, y + i * opt.gap)) : fn(s, x, y); c.strokeStyle = col; c.lineWidth = size * 0.45; c.globalAlpha = 0.28; put((t, xx, yy) => c.strokeText(t, xx, yy)); c.globalAlpha = 1; c.fillStyle = opt.fill || col; put((t, xx, yy) => c.fillText(t, xx, yy)); }
+// letters laid along the top of an arc, each rotated to the tangent
+function arcText(c, s, cx, cy, r, size, col, spread) { c.font = 'bold ' + size + 'px ' + MONO; c.textAlign = 'center'; c.textBaseline = 'middle'; const n = s.length, a0 = -Math.PI / 2 - spread / 2; for (let i = 0; i < n; i++) { const a = a0 + spread * (i + 0.5) / n; c.save(); c.translate(cx + Math.cos(a) * r, cy + Math.sin(a) * r); c.rotate(a + Math.PI / 2); c.strokeStyle = col; c.lineWidth = size * 0.45; c.globalAlpha = 0.28; c.strokeText(s[i], 0, 0); c.globalAlpha = 1; c.fillStyle = col; c.fillText(s[i], 0, 0); c.restore(); } }
+// small arched opening (top = round), used for windows, doors, loggias
+function arch(c, cx, y, w, h, col, fillA) { c.beginPath(); c.moveTo(cx - w / 2, y + h); c.lineTo(cx - w / 2, y + w / 2); c.arc(cx, y + w / 2, w / 2, Math.PI, 0); c.lineTo(cx + w / 2, y + h); c.closePath(); if (fillA) { c.fillStyle = rgba(col, fillA); c.fill(); } glowStroke(c, col, 0.7, 3.5, 0.3); }
+// horseshoe (Moorish) arch: more than a half circle
+function horseshoe(c, cx, y, w, h, col, fillA) { const r = w / 2, k = y + h - r * 0.55; c.beginPath(); c.moveTo(cx - r * 0.82, y + h); c.lineTo(cx - r * 0.82, k); c.arc(cx, y + r, r, Math.PI * 0.72, Math.PI * 2.28); c.lineTo(cx + r * 0.82, y + h); c.closePath(); if (fillA) { c.fillStyle = rgba(col, fillA); c.fill(); } glowStroke(c, col, 0.7, 3.5, 0.3); }
+
+
+// ================= TAMPA LANDMARKS  (x = left edge, b = baseline) =================
+
+// ---- 100 North Tampa (1992, 579 ft, the tallest): rounded glass bays up both corners, rosy granite grid with blue glass,
+//      a six-storey stone podium of lancet windows over tall slots and a row of oculi, a floodlit crown of small lancets,
+//      four Gothic dormers on the green copper hipped roof, spikes along the ridge
+function northTampa(c, x, b) {
+  const w = 44, P = 34, TH = 100, col = MV.pink, cx = x + w / 2;
+  const tTop = b - P - TH, crownTop = tTop - 9, ridgeY = crownTop - 15;
+  // podium
+  body(c, () => { c.beginPath(); c.rect(x - 2, b - P, w + 4, P); }, col);
+  c.fillStyle = rgba(col, 0.1); c.fillRect(x - 1.4, b - P + 0.6, w + 2.8, P - 1.2);
+  for (let k = 0; k < 13; k++) { const lx = x + 1.6 + k * 3.4; c.beginPath(); c.moveTo(lx - 0.9, b - 24); c.lineTo(lx - 0.9, b - 30); c.lineTo(lx, b - 32.5); c.lineTo(lx + 0.9, b - 30); c.lineTo(lx + 0.9, b - 24); c.closePath(); c.fillStyle = rgba(MV.lav, 0.4); c.fill(); glowStroke(c, MV.lav, 0.45, 2, 0.3); }
+  trim(c, () => { c.beginPath(); c.moveTo(x - 2, b - 23); c.lineTo(x + w + 2, b - 23); c.moveTo(x - 2, b - 9.5); c.lineTo(x + w + 2, b - 9.5); }, col, 0.5, true);
+  c.fillStyle = rgba(MV.lav, 0.35); for (let k = 0; k < 13; k++) c.fillRect(x + 0.8 + k * 3.4, b - 22, 1.6, 11.5);
+  for (let k = 0; k < 10; k++) { const ox = x + 2.6 + k * ((w - 5.2) / 9); if (Math.abs(ox - cx) < 4) continue; dot(c, ox, b - 7.2, 0.9, MV.lav, 0.7); }
+  arch(c, cx, b - 6.5, 5, 6.5, MV.lav, 0.3);
+  // tower shaft: rounded bays on both corners (shaded), granite grid between with blue glass, some floors lit warm
+  body(c, () => { c.beginPath(); c.rect(x, tTop, w, TH); }, col);
+  c.fillStyle = rgba(col, 0.1); c.fillRect(x + 0.6, tTop + 0.6, w - 1.2, TH - 1.2);
+  cylShade(c, x + 0.6, tTop + 0.6, 8, TH - 1.2, MV.blue, 0.3); cylShade(c, x + w - 8.6, tTop + 0.6, 8, TH - 1.2, MV.blue, 0.3);
+  trim(c, () => { c.beginPath(); c.moveTo(x + 8.5, tTop); c.lineTo(x + 8.5, b - P); c.moveTo(x + w - 8.5, tTop); c.lineTo(x + w - 8.5, b - P); }, col, 0.7);
+  trim(c, () => { c.beginPath(); for (let yy = tTop + 2.9; yy < b - P; yy += 2.9) { c.moveTo(x + 9, yy); c.lineTo(x + w - 9, yy); } }, col, 0.35, true);
+  seed = 17; c.fillStyle = MV.blue; for (let yy = tTop + 1.2; yy < b - P - 1; yy += 2.9) for (let xx = x + 9.6; xx < x + w - 9.5; xx += 3.6) { const warm = rnd() < 0.18; c.fillStyle = warm ? MV.yellow : MV.blue; c.globalAlpha = warm ? 0.8 : 0.55; c.fillRect(xx, yy, 2.4, 1.3); }
+  c.globalAlpha = 1;
+  seed = 23; for (let yy = tTop + 1.2; yy < b - P - 1; yy += 2.9) for (const xx of [x + 1.6, x + 4.6, x + w - 3.4, x + w - 6.4]) { c.fillStyle = rnd() < 0.2 ? MV.yellow : MV.blue; c.globalAlpha = 0.5; c.fillRect(xx, yy, 1.8, 1.3); }
+  c.globalAlpha = 1;
+  // floodlit crown band: a colonnade of little lancets right round the top, glowing warm white
+  lit(c, () => { c.beginPath(); c.rect(x - 0.8, crownTop, w + 1.6, 9); }, MV.yellow, 0.22, 0.8);
+  for (let k = 0; k < 21; k++) { const lx = x + 1.1 + k * 2.1; c.beginPath(); c.moveTo(lx - 0.6, crownTop + 7.5); c.lineTo(lx - 0.6, crownTop + 3.6); c.lineTo(lx, crownTop + 2.2); c.lineTo(lx + 0.6, crownTop + 3.6); c.lineTo(lx + 0.6, crownTop + 7.5); c.closePath(); c.fillStyle = rgba(MV.yellow, 0.75); c.fill(); }
+  // green copper hipped roof with the ridge spikes; corner caps over the rounded bays
+  lit(c, () => { c.beginPath(); c.moveTo(x - 1, crownTop); c.lineTo(x + 10, ridgeY); c.lineTo(x + w - 10, ridgeY); c.lineTo(x + w + 1, crownTop); c.closePath(); }, MV.green, 0.28, 0.9);
+  trim(c, () => { c.beginPath(); for (let k = 0; k < 8; k++) { const sx = x + 11.5 + k * ((w - 23) / 7); c.moveTo(sx, ridgeY); c.lineTo(sx, ridgeY - 2.6); } }, MV.green, 0.5, true);
+  for (const [cx0, dir] of [[x + 3.5, 1], [x + w - 3.5, -1]]) lit(c, () => { c.beginPath(); c.moveTo(cx0 - 4.5 * dir, crownTop); c.lineTo(cx0, crownTop - 8); c.lineTo(cx0 + 4.5 * dir, crownTop - 2); c.closePath(); }, MV.green, 0.28, 0.8);
+  // four gabled dormers with pointed Gothic windows, lit
+  for (let k = 0; k < 4; k++) { const dx = cx + (k - 1.5) * 8; body(c, () => { c.beginPath(); c.moveTo(dx - 3.2, crownTop); c.lineTo(dx - 3.2, crownTop - 5); c.lineTo(dx, crownTop - 10.5); c.lineTo(dx + 3.2, crownTop - 5); c.lineTo(dx + 3.2, crownTop); c.closePath(); }, MV.yellow, 0.8);
+    c.beginPath(); c.moveTo(dx - 1.7, crownTop - 0.6); c.lineTo(dx - 1.7, crownTop - 5); c.lineTo(dx, crownTop - 8.6); c.lineTo(dx + 1.7, crownTop - 5); c.lineTo(dx + 1.7, crownTop - 0.6); c.closePath(); c.fillStyle = rgba(MV.yellow, 0.8); c.fill();
+    c.strokeStyle = MV.ink; c.globalAlpha = 0.6; c.lineWidth = 0.35; c.beginPath(); c.moveTo(dx, crownTop - 8.6); c.lineTo(dx, crownTop - 0.6); c.moveTo(dx - 1.7, crownTop - 4.2); c.lineTo(dx + 1.7, crownTop - 4.2); c.stroke(); c.globalAlpha = 1; }
+  // aviation beacon on the tallest ridge spike
+  trim(c, () => { c.beginPath(); c.moveTo(x + w - 11.5, ridgeY); c.lineTo(x + w - 11.5, ridgeY - 6); }, MV.white, 0.7);
+  beacon(c, x + w - 11.5, ridgeY - 7, 1);
+}
+
+// ---- Bank of America Plaza (1986, 577 ft): white precast piers with blue-green glass stripes, flat top with a lit cap,
+//      the red flag logo up in the top-left corner
+function boaPlaza(c, x, b) {
+  const w = 42, hb = 138, top = b - hb, col = MV.white;
+  body(c, () => { c.beginPath(); c.rect(x - 2, b - 12, w + 4, 12); }, col);
+  trim(c, () => { c.beginPath(); for (let i = 4; i < w + 2; i += 6) { c.moveTo(x - 2 + i, b - 11); c.lineTo(x - 2 + i, b); } }, col, 0.7, true);
+  body(c, () => { c.beginPath(); c.rect(x, top, w, hb - 12); }, col);
+  c.fillStyle = rgba(col, 0.13); c.fillRect(x + 0.6, top + 0.6, w - 1.2, hb - 13.2);
+  // nine glass stripes between white piers
+  for (let k = 0; k < 9; k++) { const sx = x + 2.4 + k * 4.4; c.fillStyle = rgba(MV.teal, 0.22); c.fillRect(sx, top + 7, 2.6, hb - 21); }
+  wins(c, x + 0.4, top + 6, w, hb - 19, 4.4, 3.3, 9, MV.teal, 0.5, 1.6);
+  trim(c, () => { c.beginPath(); for (let k = 0; k <= 9; k++) { const sx = x + 1.2 + k * 4.4; c.moveTo(sx, top + 7); c.lineTo(sx, b - 13); } }, col, 0.55, true);
+  // mechanical band + flat cap lit blue
+  trim(c, () => { c.beginPath(); c.moveTo(x, top + 7); c.lineTo(x + w, top + 7); }, col, 0.7);
+  lit(c, () => { c.beginPath(); c.rect(x - 0.8, top - 2.5, w + 1.6, 3); }, MV.blue, 0.5, 0.8);
+  body(c, () => { c.beginPath(); c.rect(x + 14, top - 7, 14, 4.5); }, col);
+  // Bank of America flag logo, top-left
+  accent(c, () => { c.beginPath(); c.rect(x + 3, top + 1.5, 6, 3.6); }, MV.red);
+  c.fillStyle = MV.white; c.fillRect(x + 4, top + 2.6, 4, 0.5); c.fillRect(x + 4, top + 3.8, 4, 0.5);
+}
+
+// ---- One Tampa City Center (1981, 537 ft): dark bronze glass slab in a pale precast frame, light cornice crown with a
+//      stepped lid, thin light piers up the corners
+function oneTampa(c, x, b) {
+  const w = 32, hb = 128, top = b - hb, col = MV.amber;
+  body(c, () => { c.beginPath(); c.rect(x - 2, b - 10, w + 4, 10); }, MV.silver);
+  body(c, () => { c.beginPath(); c.rect(x, top, w, hb - 10); }, col, 0.9);
+  wins(c, x, top + 8, w, hb - 18, 3.4, 3.4, 7, col, 0.42, 1.4);
+  trim(c, () => { c.beginPath(); for (let i = 3.4; i < w - 1; i += 3.4) { c.moveTo(x + i, top + 8); c.lineTo(x + i, b - 10); } }, col, 0.4, true);
+  // light stone corner piers and the crown
+  trim(c, () => { c.beginPath(); c.moveTo(x + 1.2, top); c.lineTo(x + 1.2, b - 10); c.moveTo(x + w - 1.2, top); c.lineTo(x + w - 1.2, b - 10); }, MV.silver, 1.1);
+  body(c, () => { c.beginPath(); c.rect(x - 1.5, top - 1, w + 3, 9); }, MV.silver);
+  trim(c, () => { c.beginPath(); for (let i = 4; i < w + 3; i += 4) { c.moveTo(x - 1.5 + i, top + 1); c.lineTo(x - 1.5 + i, top + 7); } }, MV.silver, 0.5, true);
+  body(c, () => { c.beginPath(); c.rect(x + 3, top - 6, w - 6, 5); }, MV.silver);
+  body(c, () => { c.beginPath(); c.rect(x + 10, top - 10, w - 20, 4); }, MV.silver);
+}
+
+// ---- Truist Place (1992, ex-SunTrust Financial Centre, 525 ft): blue glass tower with white stone corners and a white
+//      stepped-pyramid crown (arched openings in the lowest step) that glows blue at night
+function truist(c, x, b) {
+  const w = 36, hb = 102, top = b - hb, cx = x + w / 2, col = MV.white;
+  body(c, () => { c.beginPath(); c.rect(x - 3, b - 12, w + 6, 12); }, col);
+  for (const ax of [x + 5, x + 14, x + w - 14, x + w - 5]) arch(c, ax, b - 10, 5, 8, MV.lav, 0.25);
+  body(c, () => { c.beginPath(); c.rect(x, top, w, hb - 12); }, col, 0.9);
+  c.fillStyle = rgba(MV.blue, 0.18); c.fillRect(x + 3, top + 1, w - 6, hb - 14);
+  wins(c, x + 2, top, w - 4, hb - 12, 3.2, 3.2, 11, MV.blue, 0.75, 1.5);
+  trim(c, () => { c.beginPath(); c.moveTo(x + 2.5, top); c.lineTo(x + 2.5, b - 12); c.moveTo(x + w - 2.5, top); c.lineTo(x + w - 2.5, b - 12); }, col, 1);
+  // the crown: three white steps, arches in the first, then the pyramid
+  const steps = [[0, 7], [5, 6], [10, 5]]; let y = top;
+  for (const [inset, hh] of steps) { lit(c, () => { c.beginPath(); c.rect(x + inset, y - hh, w - 2 * inset, hh); }, MV.blue, 0.35, 0.9); y -= hh; }
+  for (let k = 0; k < 6; k++) arch(c, x + 4 + k * ((w - 8) / 5), top - 6, 3.2, 5, MV.white, 0.35);
+  lit(c, () => { c.beginPath(); c.moveTo(x + 10, y); c.lineTo(cx, y - 16); c.lineTo(x + w - 10, y); c.closePath(); }, MV.blue, 0.55, 1);
+  if (BK) BK.truist = { x0: x + 10, x1: x + w - 10, cx, y };
+  trim(c, () => { c.beginPath(); c.moveTo(cx, y - 16); c.lineTo(cx, y); }, MV.white, 0.5, true);
+  trim(c, () => { c.beginPath(); c.moveTo(cx, y - 16); c.lineTo(cx, y - 22); }, MV.white, 0.9);
+  beacon(c, cx, y - 23, 1.1);
+}
+
+// ---- Element (2009, 460 ft, tallest residential): slender white-framed glass tower, stacked balconies up one side,
+//      curved white crown over the roof   [drawn from memory — please confirm with a photo]
+function element(c, x, b) {
+  const w = 24, hb = 114, top = b - hb, col = MV.lav;
+  body(c, () => { c.beginPath(); c.rect(x - 2, b - 9, w + 4, 9); }, col);
+  body(c, () => { c.beginPath(); c.rect(x, top, w, hb - 9); }, col, 0.9);
+  c.fillStyle = rgba(MV.teal, 0.16); c.fillRect(x + 1, top + 1, w - 2, hb - 11);
+  wins(c, x + 1, top, w - 2, hb - 9, 3.6, 3.4, 4, MV.teal, 0.6, 1.4);
+  // balcony slabs up the right-hand bay
+  trim(c, () => { c.beginPath(); for (let yy = top + 6; yy < b - 12; yy += 3.4) { c.moveTo(x + w - 9, yy); c.lineTo(x + w + 1.5, yy); } }, MV.white, 0.5, true);
+  trim(c, () => { c.beginPath(); c.moveTo(x + w - 9, top + 4); c.lineTo(x + w - 9, b - 9); }, MV.white, 0.7);
+  // curved crown: an arched white parapet sweeping over the roof, plus a slim fin
+  lit(c, () => { c.beginPath(); c.moveTo(x - 1, top + 1); c.quadraticCurveTo(x + w / 2, top - 22, x + w + 1, top + 1); c.closePath(); }, MV.white, 0.12, 1);
+  trim(c, () => { c.beginPath(); c.moveTo(x + 4, top + 1); c.lineTo(x + 4, top - 8); c.moveTo(x + w / 2, top + 1); c.lineTo(x + w / 2, top - 10.5); c.moveTo(x + w - 4, top + 1); c.lineTo(x + w - 4, top - 8); }, MV.white, 0.5, true);
+}
+
+// ---- Park Tower (1972, 458 ft): a slab of full-height white fins with dark glass between, blank white corner piers,
+//      a heavy projecting cap with a dark band under it, mechanical penthouse on top, and a wide solid podium
+function parkTower(c, x, b) {
+  const w = 34, hb = 104, top = b - hb, col = MV.white;
+  body(c, () => { c.beginPath(); c.rect(x - 9, b - 16, w + 18, 16); }, col);
+  trim(c, () => { c.beginPath(); c.moveTo(x - 9, b - 8); c.lineTo(x + w + 9, b - 8); }, col, 0.6, true);
+  body(c, () => { c.beginPath(); c.rect(x, top, w, hb - 16); }, col);
+  // corner piers
+  c.fillStyle = rgba(col, 0.16); c.fillRect(x + 0.6, top + 0.6, 3.6, hb - 17); c.fillRect(x + w - 4.2, top + 0.6, 3.6, hb - 17);
+  // fins: 10 white lines, amber glass dots between
+  trim(c, () => { c.beginPath(); for (let k = 0; k <= 10; k++) { const fx = x + 4.6 + k * 2.48; c.moveTo(fx, top + 5.5); c.lineTo(fx, b - 17); } }, col, 0.7);
+  wins(c, x + 4.4, top + 5, w - 9, hb - 22, 2.48, 3.2, 5, MV.amber, 0.38, 1.1);
+  // dark band under the cap, the cap itself, the penthouse
+  trim(c, () => { c.beginPath(); c.rect(x + 1.5, top + 1.5, w - 3, 3.5); }, MV.amber, 0.5, true);
+  wins(c, x + 1, top - 0.5, w - 2, 5, 3, 3, 3, MV.amber, 0.6, 1.4);
+  body(c, () => { c.beginPath(); c.rect(x - 3.5, top - 4, w + 7, 4.5); }, col);
+  body(c, () => { c.beginPath(); c.rect(x + 8, top - 9, w - 16, 5); }, col);
+  trim(c, () => { c.beginPath(); c.moveTo(x + 13, top - 9); c.lineTo(x + 13, top - 14); c.moveTo(x + w - 11, top - 9); c.lineTo(x + w - 11, top - 12); }, col, 0.6);
+}
+
+// ---- Rivergate Tower / Sykes (1988, 454 ft, "the beer can"): limestone cylinder, tight grid of small square windows
+//      that bunch toward the edges, blank base, a recessed slot at the top-left, red SYKES sign, and the white cube annex
+function rivergate(c, x, b) {
+  const w = 30, hb = 110, top = b - hb, col = MV.tan;
+  // the cube annex (Florida Museum of Photographic Arts) at the left foot
+  body(c, () => { c.beginPath(); c.rect(x - 24, b - 28, 24, 28); }, MV.silver, 0.9);
+  trim(c, () => { c.beginPath(); for (let i = 4; i < 24; i += 4) { c.moveTo(x - 24 + i, b - 27); c.lineTo(x - 24 + i, b); } for (let j = 4; j < 28; j += 4) { c.moveTo(x - 23, b - 28 + j); c.lineTo(x, b - 28 + j); } }, MV.silver, 0.45, true);
+  c.fillStyle = rgba(MV.blue, 0.3); c.fillRect(x - 12, b - 27, 11, 26);
+  // the cylinder: shaded so it reads as round, with the tight regular grid of small square windows
+  body(c, () => { c.beginPath(); c.rect(x, top, w, hb); }, col);
+  cylShade(c, x + 0.6, top + 0.6, w - 1.2, hb - 1.2, col, 0.22);
+  cylWins(c, x, top + 6, w, hb - 17, 17, 3.1, 21, MV.yellow, 0.7);
+  trim(c, () => { c.beginPath(); c.moveTo(x + 1, top + 19); c.lineTo(x + w - 1, top + 19); c.moveTo(x + 1, b - 10); c.lineTo(x + w - 1, b - 10); }, col, 0.5, true);
+  // recessed slot up the top-left, parapet lip, sign
+  body(c, () => { c.beginPath(); c.rect(x + 2.5, top + 1.5, 3.4, 17.5); }, col, 0.6);
+  body(c, () => { c.beginPath(); c.rect(x - 1.2, top - 2.2, w + 2.4, 2.6); }, col);
+  cylShade(c, x - 0.6, top - 1.6, w + 1.2, 1.6, col, 0.25);
+  sign(c, x + 11, top + 2, 15.5, 4.6, MV.red); neonText(c, 'SYKES', x + 18.75, top + 4.5, 3.6, MV.red);
+  arch(c, x + w / 2, b - 6.5, 4, 6.5, col, 0.3);
+}
+
+// ---- Tampa Theatre (1926): brick office block above, cast-stone arched entry, the bulb-lined marquee with black
+//      attraction boards and neon medallions, and the vertical TAMPA blade sign with its scrolled crest
+function tampaTheatre(c, x, b) {
+  const w = 54, hb = 76, top = b - hb, brick = MV.amber;
+  body(c, () => { c.beginPath(); c.rect(x, top, w, hb); }, brick);
+  // cornice + parapet
+  body(c, () => { c.beginPath(); c.rect(x - 1.5, top - 2.5, w + 3, 3); }, brick);
+  trim(c, () => { c.beginPath(); for (let i = 2; i < w + 3; i += 2.4) { c.moveTo(x - 1.5 + i, top - 2.5); c.lineTo(x - 1.5 + i, top - 1); } }, brick, 0.5, true);
+  // vertical window bays (4 bays x 8 floors)
+  for (let k = 0; k < 4; k++) { const bx = x + 8 + k * 12; trim(c, () => { c.beginPath(); c.rect(bx, top + 3, 6.5, hb - 30); }, brick, 0.5, true); for (let f = 0; f < 8; f++) { seed = 30 + k * 8 + f; c.fillStyle = MV.amber; c.globalAlpha = rnd() < 0.55 ? 0.6 : 0.2; c.fillRect(bx + 1, top + 5 + f * 5.6, 4.5, 3.4); } c.globalAlpha = 1; }
+  // ornate cast-stone entry: big central arch and two side arches, ticket booth in the middle
+  trim(c, () => { c.beginPath(); c.moveTo(x + 1.5, b - 26); c.lineTo(x + w - 1.5, b - 26); }, MV.silver, 0.6, true);
+  arch(c, x + w / 2, b - 24, 12, 24, MV.silver, 0.12);
+  arch(c, x + 8, b - 16, 7, 16, MV.silver, 0.12); arch(c, x + w - 8, b - 16, 7, 16, MV.silver, 0.12);
+  body(c, () => rr(c, x + w / 2 - 3, b - 9, 6, 9, 1), MV.yellow, 0.7);
+  // the marquee: a long canopy projecting off the facade, chasing bulbs on both edges, lit underside
+  const my = b - 34, mh = 8, mx0 = x - 7, mx1 = x + w + 7;
+  if (BK) BK.marquee = { x0: mx0 + 1, x1: mx1 - 1, y1: my + 1.4, y2: my + mh - 1.2, y3: my + mh + 1.1 };
+  lit(c, () => { c.beginPath(); c.rect(mx0 + 2, my + mh, mx1 - mx0 - 4, 2.2); }, MV.yellow, 0.2, 0.5);
+  body(c, () => { c.beginPath(); c.rect(mx0, my, mx1 - mx0, mh); }, MV.yellow, 0.7);
+  trim(c, () => { c.beginPath(); c.moveTo(mx0, my); c.lineTo(mx1, my); }, MV.green, 0.9);
+  bulbs(c, mx0 + 1, my + 1.4, mx1 - 1, my + 1.4, 1.5, MV.yellow, 0.5);
+  bulbs(c, mx0 + 1, my + mh - 1.2, mx1 - 1, my + mh - 1.2, 1.5, MV.yellow, 0.5);
+  bulbs(c, mx0 + 1, my + mh + 1.1, mx1 - 1, my + mh + 1.1, 1.5, MV.white, 0.45);
+  // black attraction boards with tiny white letter rows
+  for (const [bx, bw] of [[mx0 + 3, 10], [mx0 + 20, 22], [mx0 + 49, 12]]) { c.fillStyle = '#000'; c.fillRect(bx, my + 2.4, bw, mh - 4.4); c.fillStyle = MV.white; c.globalAlpha = 0.85; for (let r = 0; r < 2; r++) for (let i = 0; i < bw - 2; i += 1.4) if (((i * 7 + r * 3 + bx) | 0) % 5 !== 0) c.fillRect(bx + 1 + i, my + 3.2 + r * 1.8, 0.9, 0.9); c.globalAlpha = 1; }
+  // neon medallion panels (pink frames, double blue ovals) between the boards
+  for (const px of [mx0 + 14.5, mx0 + 43.5, mx1 - 3.5]) { sign(c, px - 1.6, my - 2, 3.2, mh + 2.5, MV.pink); dot(c, px, my + 1.3, 0.8, MV.blue); dot(c, px, my + 4.4, 0.8, MV.blue); }
+  neonText(c, 'TAMPA', mx0 + 8.5, my + 4.2, 3.4, MV.white, { font: 'cursive', weight: 'italic bold' });
+  // the blade sign: mounted on the corner above the marquee
+  const sx = x + 11, T = b - 92, B = my - 1;
+  const blade = () => { c.beginPath(); c.moveTo(sx - 6, B - 7); c.lineTo(sx - 7.8, B - 6); c.lineTo(sx - 7.8, B - 2.8); c.quadraticCurveTo(sx - 4, B - 1.2, sx, B); c.quadraticCurveTo(sx + 4, B - 1.2, sx + 7.8, B - 2.8); c.lineTo(sx + 7.8, B - 6); c.lineTo(sx + 6, B - 7); c.lineTo(sx + 6, T + 11); c.lineTo(sx + 8.2, T + 11); c.lineTo(sx + 8.2, T + 7.5); c.quadraticCurveTo(sx + 6.5, T + 4, sx + 5, T + 4.5); c.arc(sx, T + 4.5, 5, 0, Math.PI, true); c.quadraticCurveTo(sx - 6.5, T + 4, sx - 8.2, T + 7.5); c.lineTo(sx - 8.2, T + 11); c.lineTo(sx - 6, T + 11); c.closePath(); };
+  trim(c, () => { c.beginPath(); c.moveTo(sx + 6, B - 4); c.lineTo(sx + 12, B - 2); c.moveTo(sx + 6, T + 14); c.lineTo(sx + 12, T + 16); }, MV.silver, 0.6, true);
+  body(c, blade, MV.white, 1);
+  c.save(); c.globalAlpha = 0.35; c.strokeStyle = MV.white; c.lineWidth = 0.5; blade(); c.stroke(); c.restore();
+  bulbs(c, sx - 6, B - 8, sx - 6, T + 12, 1.6, MV.yellow, 0.42); bulbs(c, sx + 6, B - 8, sx + 6, T + 12, 1.6, MV.yellow, 0.42);
+  neonText(c, 'TAMPA', sx, T + 16, 8.6, MV.white, { vertical: true, gap: 8.1 });
+}
+
+// ---- Henry B. Plant Museum / Plant Hall (1891): long Moorish-revival brick hall with a horseshoe-arched veranda,
+//      keyhole windows, a domed central pavilion and six silver minarets with onion domes and crescent finials
+function plantHall(c, x, b) {
+  const col = MV.glow, W = 124, h = 30, top = b - h;
+  body(c, () => { c.beginPath(); c.rect(x, top, W, h); }, col);
+  c.fillStyle = rgba(col, 0.09); c.fillRect(x + 0.6, top + 0.6, W - 1.2, h - 1.2);
+  // central pavilion + dome
+  body(c, () => { c.beginPath(); c.rect(x + 46, top - 12, 32, 12); }, col);
+  c.fillStyle = rgba(col, 0.09); c.fillRect(x + 46.6, top - 11.4, 30.8, 11);
+  accent(c, () => { c.beginPath(); c.moveTo(x + 52, top - 12); c.quadraticCurveTo(x + 52, top - 24, x + 62, top - 25); c.quadraticCurveTo(x + 72, top - 24, x + 72, top - 12); c.closePath(); }, MV.silver);
+  trim(c, () => { c.beginPath(); c.moveTo(x + 62, top - 25); c.lineTo(x + 62, top - 30); }, MV.yellow, 0.8);
+  for (let k = 0; k < 3; k++) horseshoe(c, x + 54 + k * 8, top - 10, 4.4, 7, MV.yellow, 0.3);
+  // upper floor keyhole windows, ground floor veranda of horseshoe arches, porch roof line
+  for (let ax = x + 5; ax < x + W - 2; ax += 7) { if (ax > x + 44 && ax < x + 80) continue; horseshoe(c, ax, top + 4, 3.6, 7, col, 0.35); }
+  trim(c, () => { c.beginPath(); c.moveTo(x - 3, top + 15); c.lineTo(x + W + 3, top + 15); }, MV.silver, 0.8);
+  for (let ax = x + 5; ax < x + W - 2; ax += 8) horseshoe(c, ax, top + 17, 5.6, 13, MV.silver, 0.12);
+  trim(c, () => { c.beginPath(); for (let ax = x + 1; ax < x + W; ax += 8) { c.moveTo(ax, top + 15); c.lineTo(ax, b); } }, MV.silver, 0.5, true);
+  // small cupolas
+  for (const cx of [x + 22, x + 102]) accent(c, () => { c.beginPath(); c.moveTo(cx - 5, top); c.quadraticCurveTo(cx - 5, top - 8, cx, top - 8.5); c.quadraticCurveTo(cx + 5, top - 8, cx + 5, top); c.closePath(); }, MV.silver);
+  // six minarets: tapered octagonal shafts with balcony rings, onion domes, crescents
+  const mins = [[6, 52], [30, 66], [48, 58], [78, 74], [96, 56], [116, 68]];
+  for (const [mx0, mh] of mins) {
+    const mx = x + mx0, mt = b - mh, base = (mx0 > 40 && mx0 < 84) ? top - 12 : top;
+    body(c, () => { c.beginPath(); c.moveTo(mx - 2.8, base); c.lineTo(mx - 2.1, mt); c.lineTo(mx + 2.1, mt); c.lineTo(mx + 2.8, base); c.closePath(); }, MV.silver, 0.8);
+    for (const ry of [0.4, 0.68]) { const yy = mt + (base - mt) * ry; body(c, () => { c.beginPath(); c.rect(mx - 3.3, yy, 6.6, 1.5); }, MV.silver, 0.6); }
+    c.fillStyle = MV.yellow; c.globalAlpha = 0.7; for (let yy = mt + 4; yy < base - 4; yy += 6) c.fillRect(mx - 0.5, yy, 1, 2); c.globalAlpha = 1;
+    // onion dome: bulb a little wider than the shaft, drawn up to a point
+    accent(c, () => { c.beginPath(); c.moveTo(mx, mt - 11); c.bezierCurveTo(mx + 2.2, mt - 10.5, mx + 4.4, mt - 7.5, mx + 3.8, mt - 3); c.quadraticCurveTo(mx + 3.2, mt, mx + 2.4, mt); c.lineTo(mx - 2.4, mt); c.quadraticCurveTo(mx - 3.2, mt, mx - 3.8, mt - 3); c.bezierCurveTo(mx - 4.4, mt - 7.5, mx - 2.2, mt - 10.5, mx, mt - 11); c.closePath(); }, MV.silver);
+    // finial spike and crescent moon (two arcs)
+    trim(c, () => { c.beginPath(); c.moveTo(mx, mt - 11); c.lineTo(mx, mt - 15); }, MV.yellow, 0.7);
+    c.beginPath(); c.arc(mx, mt - 18, 3, Math.PI * 0.27, Math.PI * 1.73, false); c.arc(mx + 1.5, mt - 18, 2.3, Math.PI * 1.568, Math.PI * 0.432, true); c.closePath();
+    c.globalAlpha = 0.3; c.strokeStyle = MV.yellow; c.lineWidth = 1.4; c.stroke(); c.globalAlpha = 1; c.fillStyle = MV.yellow; c.fill();
+  }
+}
+
+// ---- Sunshine Skyway Bridge (1987): a long high-level deck on many piers rising to the main span, two single concrete
+//      pylons that pass straight through the deck to the water, yellow stays fanning from each pylon in one plane
+function skyway(c, x, wl) {
+  const L = 340, p1 = x + 122, p2 = x + 218, deckTop = wl - 44, deckEnd = wl - 9;
+  // deck profile: flat across the main span, then a long smooth descent to each end
+  const deckY = (px) => { const flat = 22; let d = 0; if (px < p1 - flat) d = (p1 - flat - px) / 112; else if (px > p2 + flat) d = (px - p2 - flat) / 112; d = Math.min(1, Math.max(0, d)); const s = d * d * (3 - 2 * d); return deckTop + (deckEnd - deckTop) * s; };
+  // approach piers
+  c.beginPath(); for (let px = x + 4; px < x + L; px += 13) { if (Math.abs(px - p1) < 6 || Math.abs(px - p2) < 6) continue; c.moveTo(px, deckY(px) + 1); c.lineTo(px, wl + 2); }
+  glowStroke(c, MV.silver, 0.7, 3, 0.2);
+  // pylons: single concrete columns straight through the deck to the water, on a wider pier below
+  for (const px of [p1, p2]) {
+    const ptop = deckTop - 66;
+    body(c, () => { c.beginPath(); c.moveTo(px - 5.5, wl + 2); c.lineTo(px - 4.2, deckTop + 3); c.lineTo(px - 2.4, ptop); c.lineTo(px + 2.4, ptop); c.lineTo(px + 4.2, deckTop + 3); c.lineTo(px + 5.5, wl + 2); c.closePath(); }, MV.white, 1);
+    // stays: 12 per side in one plane, anchored down the upper part of the pylon, landing along the deck
+    c.beginPath(); for (let k = 0; k < 12; k++) { const ay = ptop + 2.5 + k * 3.6, dx = 10 + k * 8.2; c.moveTo(px, ay); c.lineTo(px - dx, deckY(px - dx) - 1); c.moveTo(px, ay); c.lineTo(px + dx, deckY(px + dx) - 1); }
+    glowStroke(c, MV.yellow, 0.55, 2.6, 0.22);
+    beacon(c, px, ptop - 1, 1);
+  }
+  // the deck, drawn last so it sits over the stays and piers, with lights along it
+  c.beginPath(); c.moveTo(x - 6, deckEnd + 2); for (let px = x - 6; px <= x + L + 6; px += 4) c.lineTo(px, deckY(px)); glowStroke(c, MV.white, 2.4, 8, 0.28);
+  c.beginPath(); c.moveTo(x - 6, deckEnd + 3.2); for (let px = x - 6; px <= x + L + 6; px += 4) c.lineTo(px, deckY(px) + 1.6); glowStroke(c, MV.silver, 0.6, 2, 0.15);
+  for (let px = x + 2; px < x + L; px += 20) dot(c, px, deckY(px) - 2, 0.7, MV.yellow, 0.9);
+}
+
+// ---- Sulphur Springs Water Tower (1927, 214 ft): white concrete shaft on buttress fins, slit windows, a flared collar
+//      near the top and a narrower castellated crown above it
+function sulphur(c, x, b) {
+  const w = 12, h = 100, top = b - h, cx = x + w / 2, col = MV.white;
+  // buttress fins at the foot
+  body(c, () => { c.beginPath(); c.moveTo(x - 8, b); c.lineTo(x, b - 18); c.lineTo(x, b); c.closePath(); c.moveTo(x + w + 8, b); c.lineTo(x + w, b - 18); c.lineTo(x + w, b); c.closePath(); c.moveTo(cx - 3.5, b); c.lineTo(cx - 1, b - 14); c.lineTo(cx + 1, b - 14); c.lineTo(cx + 3.5, b); c.closePath(); }, col, 0.8);
+  // shaft (white concrete, shaded round)
+  body(c, () => { c.beginPath(); c.rect(x, top + 14, w, h - 14); }, col);
+  cylShade(c, x + 0.6, top + 14.6, w - 1.2, h - 15.2, col, 0.5);
+  c.fillStyle = MV.yellow; c.globalAlpha = 0.8; for (const [sx, sy] of [[3, 30], [8, 44], [3, 58], [8, 70], [3, 82]]) c.fillRect(x + sx, top + sy, 1, 3); c.globalAlpha = 1;
+  // flared collar with its lip
+  body(c, () => { c.beginPath(); c.moveTo(x, top + 14); c.lineTo(x - 4, top + 8.5); c.lineTo(x + w + 4, top + 8.5); c.lineTo(x + w, top + 14); c.closePath(); }, col, 0.9);
+  body(c, () => { c.beginPath(); c.rect(x - 4.8, top + 6.5, w + 9.6, 2.2); }, col, 0.8);
+  // castellated crown: narrower drum with merlons and dark slots
+  body(c, () => { c.beginPath(); c.moveTo(x + 1, top + 6.5); c.lineTo(x + 1, top); c.lineTo(x + 2.6, top); c.lineTo(x + 2.6, top - 2.4); c.lineTo(x + 4.4, top - 2.4); c.lineTo(x + 4.4, top); c.lineTo(x + 5.6, top); c.lineTo(x + 5.6, top - 2.4); c.lineTo(x + 7.4, top - 2.4); c.lineTo(x + 7.4, top); c.lineTo(x + 8.6, top); c.lineTo(x + 8.6, top - 2.4); c.lineTo(x + 10.4, top - 2.4); c.lineTo(x + 10.4, top); c.lineTo(x + w - 1, top); c.lineTo(x + w - 1, top + 6.5); c.closePath(); }, col, 0.8);
+  cylShade(c, x + 1.6, top + 0.6, w - 3.2, 5.4, col, 0.3);
+  c.fillStyle = MV.ink; for (const sx of [3.2, 5.9, 8.6]) c.fillRect(x + sx, top + 1.2, 0.9, 4);
+  cylShade(c, x - 3.4, top + 9, w + 6.8, 4.6, col, 0.2);
+  beacon(c, cx, top - 4, 1.2);
+}
+
+// ---- Centro Ybor (7th Avenue): the cream centre block with its bowed balcony and canopy, brick pilasters and
+//      two-storey brick wings with green walkway roofs, the five-globe lamp posts, and up on the roof the steel-framed
+//      CENTRO [senorita medallion] YBOR sign in salmon letters
+function centroYbor(c, x, b) {
+  const brick = MV.amber, cream = MV.silver, W = 118, cx = x + W / 2;
+  // side wings
+  for (const wx of [x, x + W - 30]) {
+    body(c, () => { c.beginPath(); c.rect(wx, b - 30, 30, 30); }, brick, 0.9);
+    c.fillStyle = rgba(brick, 0.1); c.fillRect(wx + 0.6, b - 29.4, 28.8, 28.8);
+    body(c, () => { c.beginPath(); c.rect(wx - 1, b - 32, 32, 2.2); }, cream, 0.6);
+    c.fillStyle = rgba(MV.teal, 0.35); for (let k = 0; k < 3; k++) c.fillRect(wx + 3.5 + k * 9, b - 28, 6, 5);
+    // green walkway roof, posts and railing, ground-floor openings
+    lit(c, () => { c.beginPath(); c.rect(wx - 2, b - 19, 34, 1.8); }, MV.green, 0.35, 0.7);
+    trim(c, () => { c.beginPath(); for (let k = 0; k < 5; k++) { c.moveTo(wx + 2 + k * 6.5, b - 17); c.lineTo(wx + 2 + k * 6.5, b); } c.moveTo(wx - 1, b - 9); c.lineTo(wx + 31, b - 9); }, cream, 0.5, true);
+    c.fillStyle = rgba(MV.yellow, 0.3); for (let k = 0; k < 4; k++) c.fillRect(wx + 3.5 + k * 6.5, b - 8, 3.4, 8);
+  }
+  // brick pilasters with cream caps
+  for (const px of [x + 30, x + W - 37]) {
+    body(c, () => { c.beginPath(); c.rect(px, b - 50, 7, 50); }, brick, 0.9);
+    c.fillStyle = rgba(brick, 0.12); c.fillRect(px + 0.6, b - 49.4, 5.8, 48.8);
+    body(c, () => { c.beginPath(); c.rect(px - 1, b - 52.5, 9, 2.6); }, cream, 0.6);
+    c.fillStyle = rgba(MV.teal, 0.35); c.fillRect(px + 2, b - 44, 3, 4); c.fillRect(px + 2, b - 30, 3, 4);
+  }
+  // cream centre block
+  const bx = x + 37, bw = W - 74;
+  body(c, () => { c.beginPath(); c.rect(bx, b - 46, bw, 46); }, cream, 0.9);
+  c.fillStyle = rgba(cream, 0.16); c.fillRect(bx + 0.6, b - 45.4, bw - 1.2, 44.8);
+  body(c, () => { c.beginPath(); c.rect(bx - 0.5, b - 48, bw + 1, 2.2); }, cream, 0.6);
+  c.fillStyle = rgba(MV.teal, 0.35); for (let k = 0; k < 3; k++) c.fillRect(bx + 4 + k * 13.5, b - 42, 9, 5);
+  // bowed balcony band with the deco-fan railing, middle windows, flat canopy, entrance
+  trim(c, () => { c.beginPath(); c.moveTo(bx - 1, b - 33); c.quadraticCurveTo(cx, b - 37.5, bx + bw + 1, b - 33); c.moveTo(bx - 1, b - 30); c.quadraticCurveTo(cx, b - 34.5, bx + bw + 1, b - 30); }, cream, 0.7);
+  trim(c, () => { c.beginPath(); for (let k = 0; k < 7; k++) { const fx = bx + 4 + k * ((bw - 8) / 6), fy = b - 30 - 3.6 * (1 - Math.pow((fx - cx) / (bw / 2), 2)) * 0.9; c.moveTo(fx - 1.6, fy - 0.2); c.quadraticCurveTo(fx, fy - 2.6, fx + 1.6, fy - 0.2); } }, MV.teal, 0.45);
+  c.fillStyle = rgba(MV.teal, 0.35); for (let k = 0; k < 3; k++) c.fillRect(bx + 4 + k * 13.5, b - 27, 9, 5);
+  body(c, () => { c.beginPath(); c.rect(bx - 3, b - 19.5, bw + 6, 2.2); }, cream, 0.6);
+  c.fillStyle = rgba(MV.yellow, 0.22); c.fillRect(cx - 10, b - 16, 20, 16); trim(c, () => { c.beginPath(); c.rect(cx - 10, b - 16, 20, 16); c.moveTo(cx, b - 16); c.lineTo(cx, b); }, cream, 0.5, true);
+  // rooftop sign: steel rails and posts, the salmon letters, the medallion on its own post
+  const sy = b - 60;
+  trim(c, () => { c.beginPath(); c.moveTo(bx - 4, sy + 3.5); c.lineTo(bx + bw + 4, sy + 3.5); c.moveTo(bx - 4, sy - 3.5); c.lineTo(bx + bw + 4, sy - 3.5); for (const px of [bx + 6, bx + 20, cx, bx + bw - 20, bx + bw - 6]) { c.moveTo(px, sy + 3.5); c.lineTo(px, b - 48); } }, MV.silver, 0.45, true);
+  neonText(c, 'CENTRO', cx - 22, sy, 6.6, MV.salmon, { font: 'Georgia, "Times New Roman", serif' });
+  neonText(c, 'YBOR', cx + 18.5, sy, 6.6, MV.salmon, { font: 'Georgia, "Times New Roman", serif' });
+  const my = sy - 4;
+  c.beginPath(); c.ellipse(cx, my, 7.2, 8.6, 0, 0, Math.PI * 2); c.fillStyle = MV.ink; c.fill(); glowStroke(c, MV.glow, 1.4, 6, 0.5);
+  c.beginPath(); c.ellipse(cx, my, 5.6, 7, 0, 0, Math.PI * 2); c.fillStyle = rgba(MV.glow, 0.55); c.fill();
+  c.setLineDash([0.9, 0.7]); c.beginPath(); c.ellipse(cx, my, 5, 6.3, 0, 0, Math.PI * 2); c.strokeStyle = MV.salmon; c.lineWidth = 0.6; c.stroke(); c.setLineDash([]);
+  // the senorita: hair, face, flower, lace collar, necklace
+  dot(c, cx - 0.4, my - 1.6, 3.2, MV.ink); dot(c, cx + 2.2, my - 0.4, 2.2, MV.ink);
+  dot(c, cx - 0.6, my - 0.6, 2.4, MV.yellow, 0.95);
+  dot(c, cx + 1.9, my - 3.6, 1.1, MV.pink);
+  c.beginPath(); c.ellipse(cx - 0.3, my + 4.2, 3.4, 1.5, 0, Math.PI, 0); c.fillStyle = MV.white; c.fill();
+  c.fillStyle = MV.ink; c.fillRect(cx - 3.2, my + 4.2, 6, 1.4);
+  for (let k = 0; k < 5; k++) dot(c, cx - 1.6 + k * 0.8, my + 2.6 + Math.abs(k - 2) * -0.3, 0.32, MV.yellow);
+  // five-globe lamp posts out front
+  for (const lx of [x + 15, x + W - 15]) {
+    trim(c, () => { c.beginPath(); c.moveTo(lx, b); c.lineTo(lx, b - 34); c.moveTo(lx - 3.2, b - 33); c.lineTo(lx + 3.2, b - 33); }, MV.silver, 0.7);
+    for (const [gx, gy, r] of [[0, -37.5, 1.6], [-3, -34.6, 1.3], [3, -34.6, 1.3], [-1.6, -31.5, 1.2], [1.6, -31.5, 1.2]]) { dot(c, lx + gx, b + gy, r + 1.4, MV.white, 0.18); dot(c, lx + gx, b + gy, r, MV.white, 0.95); }
+  }
+}
+
+// ---- Amalie Arena (Channelside): the long shallow-arched roof, glass front, the big sign
+function amalie(c, x, b) {
+  const w = 104, col = MV.lav;
+  body(c, () => { c.beginPath(); c.moveTo(x, b); c.lineTo(x, b - 12); c.quadraticCurveTo(x + w / 2, b - 50, x + w, b - 12); c.lineTo(x + w, b); c.closePath(); }, col);
+  trim(c, () => { c.beginPath(); for (let k = 1; k < 8; k++) { const xx = x + k * w / 8; c.moveTo(xx, b - 12 - (1 - Math.pow((xx - x - w / 2) / (w / 2), 2)) * 19); c.lineTo(xx, b); } c.moveTo(x, b - 12); c.lineTo(x + w, b - 12); c.moveTo(x, b - 6); c.lineTo(x + w, b - 6); }, col, 0.55, true);
+  c.fillStyle = rgba(MV.blue, 0.22); c.fillRect(x + 8, b - 11, w - 16, 10);
+  wins(c, x + 8, b - 12, w - 16, 11, 4, 3, 3, MV.blue, 0.55, 1.4);
+  body(c, () => { c.beginPath(); c.rect(x + w / 2 - 20, b - 18, 40, 7); }, col, 0.8);
+  sign(c, x + w / 2 - 18, b - 16.5, 36, 5, MV.pink); neonText(c, 'AMALIE ARENA', x + w / 2, b - 14, 3.4, MV.pink);
+  beacon(c, x + w / 2, b - 32, 1.1);
+}
+
+// ---- TECO Line streetcar (near layer): yellow Birney replica car — arched roof with the raised monitor, letterboard,
+//      a row of framed windows with the brass safety rail, red folding doors at each end, 434 numbers, the TECO Line
+//      roundel, two trucks underneath and the trolley pole reaching up to the wire
+function streetcar(c, x, b) {
+  const L = 66, top = b - 19, yel = MV.yellow, red = MV.red;
+  // wire
+  c.beginPath(); c.moveTo(x - 20, b - 36.5); c.lineTo(x + L + 20, b - 36.5); glowStroke(c, MV.silver, 0.4, 2, 0.15);
+  // trucks + wheels
+  for (const tx of [x + 15, x + L - 15]) { body(c, () => { c.beginPath(); c.rect(tx - 7, b - 4.5, 14, 3.2); }, MV.silver, 0.6); for (const wx of [tx - 4, tx + 4]) { dot(c, wx, b - 1.9, 1.9, MV.ink); c.beginPath(); c.arc(wx, b - 1.9, 1.9, 0, Math.PI * 2); glowStroke(c, MV.silver, 0.6, 2.5, 0.3); } }
+  // body
+  body(c, () => rr(c, x, top, L, 15.5, 1.2), yel, 0.9);
+  c.fillStyle = rgba(yel, 0.4); c.fillRect(x + 0.6, top + 0.6, L - 1.2, 14.3);
+  // steps under the doors
+  body(c, () => { c.beginPath(); c.rect(x + 1.5, b - 3.8, 6, 1.4); c.rect(x + L - 7.5, b - 3.8, 6, 1.4); }, yel, 0.5);
+  // roof: low arch plus the raised monitor with its little windows
+  body(c, () => { c.beginPath(); c.moveTo(x + 0.5, top); c.quadraticCurveTo(x + 2, top - 2.6, x + 6, top - 2.6); c.lineTo(x + L - 6, top - 2.6); c.quadraticCurveTo(x + L - 2, top - 2.6, x + L - 0.5, top); c.closePath(); }, red, 0.8);
+  body(c, () => { c.beginPath(); c.moveTo(x + 9, top - 2.6); c.quadraticCurveTo(x + 10, top - 5, x + 13, top - 5); c.lineTo(x + L - 13, top - 5); c.quadraticCurveTo(x + L - 10, top - 5, x + L - 9, top - 2.6); c.closePath(); }, red, 0.7);
+  c.fillStyle = rgba(MV.teal, 0.5); for (let i = 0; i < 9; i++) c.fillRect(x + 14 + i * 4.4, top - 4.2, 2.6, 1.1);
+  // letterboard text (dark lettering on yellow)
+  c.fillStyle = MV.ink; c.globalAlpha = 0.75; for (let i = 0; i < 26; i++) if (i % 5 !== 4) c.fillRect(x + 12 + i * 1.6, top + 1.4, 1.1, 0.9); c.globalAlpha = 1;
+  // windows with maroon frames and the brass rail
+  for (let i = 0; i < 8; i++) { const wx = x + 9.5 + i * 5.9; c.fillStyle = rgba(MV.teal, 0.42); c.fillRect(wx, top + 3.2, 4.9, 6.2); c.strokeStyle = red; c.lineWidth = 0.55; c.globalAlpha = 0.9; c.strokeRect(wx, top + 3.2, 4.9, 6.2); c.beginPath(); c.moveTo(wx, top + 5); c.lineTo(wx + 4.9, top + 5); c.stroke(); c.globalAlpha = 1; }
+  trim(c, () => { c.beginPath(); c.moveTo(x + 9.5, top + 7); c.lineTo(x + L - 9.5, top + 7); }, yel, 0.45, true);
+  // red folding doors at both ends
+  for (const dx of [x + 2.2, x + L - 7.2]) { c.fillStyle = rgba(MV.teal, 0.3); c.fillRect(dx, top + 3.2, 5, 10.5); c.strokeStyle = red; c.lineWidth = 0.7; c.strokeRect(dx, top + 3.2, 5, 10.5); c.lineWidth = 0.45; c.beginPath(); for (let k = 1; k < 4; k++) { c.moveTo(dx + k * 1.25, top + 3.2); c.lineTo(dx + k * 1.25, top + 13.7); } c.stroke(); }
+  // car number and the roundel
+  c.font = 'bold 2.6px ' + MONO; c.textAlign = 'center'; c.textBaseline = 'middle'; c.fillStyle = MV.ink; c.fillText('434', x + 13.5, top + 11.8); c.fillText('434', x + L - 13.5, top + 11.8);
+  accent(c, () => { c.beginPath(); c.rect(x + L / 2 - 1, top + 11.3, 7, 2.2); }, red);
+  dot(c, x + L / 2 + 8.5, top + 12.2, 3, MV.ink); c.beginPath(); c.arc(x + L / 2 + 8.5, top + 12.2, 3, 0, Math.PI * 2); glowStroke(c, yel, 0.6, 2.5, 0.35);
+  neonText(c, 'TECO', x + L / 2 + 8.5, top + 12.4, 2.2, yel);
+  // trolley pole to the wire
+  c.beginPath(); c.moveTo(x + L / 2 - 4, top - 5); c.lineTo(x + L / 2 + 15, b - 36.5); glowStroke(c, MV.silver, 0.6, 2.5, 0.25);
+  dot(c, x + L / 2 + 15, b - 36.5, 0.8, MV.white);
+}
+
+
+// ================= MIAMI LANDMARKS  (x = left edge, b = baseline)  — all drawn from memory =================
+
+// small palm for foregrounds and courtyards (the big scene palm is far too leafy at this size)
+function miniPalm(c, x, base, h, lean, fr) {
+  const tx = x + lean, ty = base - h, L = h * 0.55;
+  c.beginPath(); c.moveTo(x, base); c.quadraticCurveTo(x + lean * 0.3, base - h * 0.6, tx, ty); glowStroke(c, '#b04dff', 0.9, 3, 0.2);
+  for (let i = 0; i < fr; i++) { const a = -Math.PI * 0.9 + (i / (fr - 1)) * Math.PI * 0.8; c.beginPath(); c.moveTo(tx, ty); c.quadraticCurveTo(tx + Math.cos(a) * L * 0.6, ty + Math.sin(a) * L * 0.6 - 2, tx + Math.cos(a) * L, ty + Math.sin(a) * L * 0.5 + L * 0.35); glowStroke(c, '#b04dff', 0.8, 2.5, 0.2); }
+}
+
+// ---- Atlantis Condominium (Brickell, Arquitectonica 1982): the blue glass slab with the white grid, the square
+//      sky-court punched through it (red spiral stair, palm, jacuzzi), the red triangle on the roof, yellow at the foot
+function atlantis(c, x, b) {
+  const w = 112, h = 76, top = b - h, col = MV.teal;
+  body(c, () => { c.beginPath(); c.rect(x, top, w, h); }, col, 1);
+  c.fillStyle = rgba(MV.blue, 0.28); c.fillRect(x + 0.6, top + 0.6, w - 1.2, h - 1.2);
+  trim(c, () => { c.beginPath(); for (let i = 5.6; i < w - 1; i += 5.6) { c.moveTo(x + i, top + 1); c.lineTo(x + i, b - 1); } for (let j = 3.8; j < h - 1; j += 3.8) { c.moveTo(x + 1, top + j); c.lineTo(x + w - 1, top + j); } }, MV.white, 0.35, true);
+  wins(c, x, top, w, h, 5.6, 3.8, 3, MV.white, 0.35, 1.2);
+  // the sky court: a square cut clean through, sky showing behind it
+  const hx = x + 66, hy = top + 11, hs = 22;
+  c.save(); c.globalCompositeOperation = 'destination-out'; c.fillStyle = '#000'; c.fillRect(hx, hy, hs, hs); c.restore();
+  trim(c, () => { c.beginPath(); c.rect(hx, hy, hs, hs); }, MV.white, 0.8);
+  c.strokeStyle = MV.red; c.lineWidth = 1.1; c.beginPath(); for (let k = 0; k < 9; k++) { const yy = hy + 3.5 + k * 2; c.moveTo(hx + 3, yy); c.quadraticCurveTo(hx + 6, yy - 1.2, hx + 8.5, yy + 0.6); } c.moveTo(hx + 5.6, hy + 3); c.lineTo(hx + 5.6, hy + hs - 3); c.stroke();
+  miniPalm(c, hx + 15, hy + hs - 1.5, 13, 1.5, 6);
+  c.fillStyle = rgba(MV.teal, 0.8); c.fillRect(hx + 2.5, hy + hs - 4.5, 7, 2.6);
+  accent(c, () => { c.beginPath(); c.moveTo(x + 2, top); c.lineTo(x + 2, top - 15); c.lineTo(x + 17, top); c.closePath(); }, MV.red);
+  accent(c, () => { c.beginPath(); c.moveTo(x + w, b); c.lineTo(x + w - 14, b); c.lineTo(x + w, b - 14); c.closePath(); }, MV.yellow);
+  trim(c, () => { c.beginPath(); c.moveTo(x - 2, b - 2.5); c.lineTo(x + w + 2, b - 2.5); }, MV.white, 0.6, true);
+}
+
+// ---- Miami Tower (I.M. Pei, 1987): three tiers stepping back, each with a rounded end, floodlit in changing colours,
+//      ribbon windows, the Knight Center podium with the Metromover running through it
+function miamiTower(c, x, b) {
+  const tiers = [[48, 46, MV.pink], [40, 40, '#b04dff'], [32, 38, MV.teal]];
+  let y = b - 14, left = x;
+  body(c, () => { c.beginPath(); c.rect(x - 6, b - 14, 62, 14); }, MV.silver, 0.8);
+  trim(c, () => { c.beginPath(); c.moveTo(x - 14, b - 8); c.lineTo(x + 64, b - 8); }, MV.white, 1);
+  c.fillStyle = rgba(MV.yellow, 0.5); c.fillRect(x - 12, b - 10.5, 9, 2.5);
+  tiers.forEach(([w, h, col], i) => {
+    y -= h; left = x + i * 3;
+    if (BK) BK.tiers.push({ left, y, w, h });
+    body(c, () => { c.beginPath(); c.moveTo(left, y + h); c.lineTo(left, y); c.lineTo(left + w - 12, y); c.arcTo(left + w, y, left + w, y + 12, 12); c.lineTo(left + w, y + h); c.closePath(); }, col, 1);
+    c.fillStyle = rgba(col, 0.26); c.fillRect(left + 0.6, y + 0.6, w - 1.2, h - 1.2);
+    cylShade(c, left + w - 16, y + 0.6, 15.4, h - 1.2, col, 0.3);
+    trim(c, () => { c.beginPath(); for (let j = 4; j < h - 1; j += 4) { c.moveTo(left + 1.5, y + j); c.lineTo(left + w - (j < 12 ? 12 - Math.sqrt(144 - (12 - j) * (12 - j)) : 0) - 1.5, y + j); } }, MV.white, 0.35, true);
+    wins(c, left, y, w - 4, h, 3.6, 4, 7 + i, MV.white, 0.45, 1.3);
+  });
+  trim(c, () => { c.beginPath(); c.moveTo(left + 9, y); c.lineTo(left + 9, y - 16); }, MV.white, 0.9);
+  beacon(c, left + 9, y - 17, 1.1);
+}
+
+// ---- Freedom Tower (1925, Giralda-style): wide salmon base with a cream cornice, the tower shaft with corner quoins,
+//      three arched tiers stepping in, the lantern dome
+function freedomTower(c, x, b) {
+  const col = MV.salmon, cream = MV.silver, W = 56, cx = x + W / 2;
+  body(c, () => { c.beginPath(); c.rect(x, b - 44, W, 44); }, col, 0.9);
+  c.fillStyle = rgba(col, 0.13); c.fillRect(x + 0.6, b - 43.4, W - 1.2, 42.8);
+  for (let k = 0; k < 6; k++) arch(c, x + 5.5 + k * 9, b - 12, 5, 12, MV.yellow, 0.3);
+  wins(c, x + 1, b - 40, W - 2, 26, 4.6, 4.4, 5, MV.yellow, 0.55, 1.6);
+  body(c, () => { c.beginPath(); c.rect(x - 1.5, b - 47, W + 3, 3); }, cream, 0.6);
+  trim(c, () => { c.beginPath(); for (let i = 2; i < W + 3; i += 2.2) { c.moveTo(x - 1.5 + i, b - 47); c.lineTo(x - 1.5 + i, b - 45.5); } }, cream, 0.4, true);
+  // shaft
+  body(c, () => { c.beginPath(); c.rect(cx - 11, b - 92, 22, 45); }, col, 0.9);
+  c.fillStyle = rgba(col, 0.13); c.fillRect(cx - 10.4, b - 91.4, 20.8, 43.8);
+  wins(c, cx - 10, b - 90, 20, 42, 4.4, 5, 9, MV.yellow, 0.6, 1.6);
+  trim(c, () => { c.beginPath(); for (let j = 0; j < 44; j += 4) { c.moveTo(cx - 11, b - 92 + j); c.lineTo(cx - 9, b - 92 + j); c.moveTo(cx + 11, b - 92 + j); c.lineTo(cx + 9, b - 92 + j); } }, cream, 0.5, true);
+  // three tiers with arched openings and balustrades, then the dome
+  let ty = b - 92; const tiers = [[18, 11, 4], [13, 9, 3], [9, 8, 2]];
+  for (const [tw, th, n] of tiers) {
+    body(c, () => { c.beginPath(); c.rect(cx - tw / 2 - 1.5, ty - 2, tw + 3, 2); }, cream, 0.5);
+    ty -= th + 2;
+    body(c, () => { c.beginPath(); c.rect(cx - tw / 2, ty, tw, th); }, col, 0.8);
+    c.fillStyle = rgba(col, 0.13); c.fillRect(cx - tw / 2 + 0.5, ty + 0.5, tw - 1, th - 1);
+    for (let k = 0; k < n; k++) arch(c, cx - tw / 2 + tw * (k + 0.5) / n, ty + 2, tw / n - 1.6, th - 3.5, MV.yellow, 0.4);
+  }
+  accent(c, () => { c.beginPath(); c.moveTo(cx - 5, ty); c.quadraticCurveTo(cx - 5, ty - 7, cx, ty - 7.5); c.quadraticCurveTo(cx + 5, ty - 7, cx + 5, ty); c.closePath(); }, cream);
+  trim(c, () => { c.beginPath(); c.moveTo(cx, ty - 7.5); c.lineTo(cx, ty - 14); }, MV.yellow, 0.9);
+  beacon(c, cx, ty - 15, 1);
+}
+
+// ---- Southeast Financial Center (1984, 764 ft): pale vertical piers and grey glass strips, flat crown, the corner
+//      that steps down in a staircase of setbacks
+function southeast(c, x, b) {
+  const w = 42, h = 148, top = b - h, col = MV.white;
+  body(c, () => { c.beginPath(); c.rect(x - 3, b - 12, w + 6, 12); }, col);
+  trim(c, () => { c.beginPath(); for (let i = 5; i < w + 6; i += 6) { c.moveTo(x - 3 + i, b - 11); c.lineTo(x - 3 + i, b); } }, col, 0.6, true);
+  body(c, () => { c.beginPath(); c.moveTo(x, b - 12); c.lineTo(x, top); c.lineTo(x + w - 20, top); for (let k = 0; k < 4; k++) { c.lineTo(x + w - 20 + k * 5, top + k * 9 + 9); c.lineTo(x + w - 15 + k * 5, top + k * 9 + 9); } c.lineTo(x + w, top + 36); c.lineTo(x + w, b - 12); c.closePath(); }, col, 1);
+  c.fillStyle = rgba(col, 0.12); c.fillRect(x + 0.6, top + 0.6, w - 20.6, h - 13.2);
+  for (let k = 0; k < 4; k++) { c.fillRect(x + w - 20 + k * 5, top + k * 9 + 9.6, 5, h - 12 - k * 9 - 10); }
+  c.fillRect(x + w - 5.4, top + 36.6, 4.8, h - 49);
+  for (let k = 0; k < 9; k++) { const sx = x + 2.8 + k * 4.4; const topK = sx < x + w - 20 ? top : top + 9 * Math.floor((sx - (x + w - 20)) / 5) + 9; c.fillStyle = rgba(MV.lav, 0.28); c.fillRect(sx, topK + 3, 2.4, b - 15 - topK); }
+  wins(c, x + 0.6, top + 3, w - 1, h - 15, 4.4, 3.4, 13, MV.white, 0.5, 1.5);
+  trim(c, () => { c.beginPath(); c.moveTo(x + 1, top + 4); c.lineTo(x + w - 20, top + 4); }, col, 0.6);
+  beacon(c, x + 6, top - 1.5, 1);
+}
+
+// ---- One Thousand Museum (Zaha Hadid, 2019): glass tower wrapped in the white curving exoskeleton, dense at the
+//      foot and the crown, opening up through the middle, the rooftop helipad crown
+function thousandMuseum(c, x, b) {
+  const w = 32, h = 140, top = b - h, col = MV.white;
+  body(c, () => { c.beginPath(); c.rect(x, top, w, h); }, col, 0.8);
+  c.fillStyle = rgba(MV.teal, 0.2); c.fillRect(x + 0.6, top + 0.6, w - 1.2, h - 1.2);
+  wins(c, x, top, w, h, 3.2, 3.2, 19, MV.teal, 0.45, 1.3);
+  // exoskeleton ribs: sweeping curves up each side, lattice at the bottom and the top
+  trim(c, () => {
+    c.beginPath();
+    for (const [x0, x1, x2] of [[x + 2, x + 10, x + 4], [x + w - 2, x + w - 10, x + w - 4], [x + 8, x + 2, x + 12], [x + w - 8, x + w - 2, x + w - 12]]) { c.moveTo(x0, b); c.bezierCurveTo(x1, b - 45, x1, top + 60, x2, top + 6); }
+    for (let k = 0; k < 6; k++) { const yy = b - 4 - k * 8; c.moveTo(x + 1, yy); c.quadraticCurveTo(x + w / 2, yy - 6, x + w - 1, yy); }
+    for (let k = 0; k < 4; k++) { const yy = top + 6 + k * 7; c.moveTo(x + 1, yy); c.quadraticCurveTo(x + w / 2, yy + 5, x + w - 1, yy); }
+    c.moveTo(x + 4, b - 46); c.lineTo(x + 12, b - 20); c.moveTo(x + w - 4, b - 46); c.lineTo(x + w - 12, b - 20);
+  }, col, 0.7);
+  lit(c, () => { c.beginPath(); c.moveTo(x - 1, top); c.quadraticCurveTo(x + w / 2, top - 9, x + w + 1, top); c.closePath(); }, col, 0.15, 0.9);
+  beacon(c, x + w / 2, top - 5.5, 1);
+}
+
+// ---- Bacardi Building (1963) and the jewel-box annex (1973): the slab lifted on its stalk with the blue-and-white
+//      tile murals on the end walls, and the cube of stained glass beside it
+function bacardi(c, x, b) {
+  const col = MV.white;
+  body(c, () => { c.beginPath(); c.rect(x + 20, b - 14, 12, 14); }, col, 0.8);
+  body(c, () => { c.beginPath(); c.rect(x, b - 50, 52, 36); }, col, 0.9);
+  c.fillStyle = rgba(MV.silver, 0.12); c.fillRect(x + 0.6, b - 49.4, 50.8, 34.8);
+  trim(c, () => { c.beginPath(); for (let j = 4.5; j < 36; j += 4.5) { c.moveTo(x + 9, b - 50 + j); c.lineTo(x + 43, b - 50 + j); } }, col, 0.4, true);
+  wins(c, x + 9, b - 50, 34, 36, 3.6, 4.5, 6, MV.yellow, 0.5, 1.6);
+  for (const mx of [x, x + 43]) { seed = 41; for (let j = 0; j < 12; j++) for (let i = 0; i < 3; i++) { c.fillStyle = rnd() < 0.6 ? MV.blue : MV.white; c.globalAlpha = 0.75; c.fillRect(mx + 0.9 + i * 2.75, b - 49 + j * 2.9, 2.2, 2.4); } c.globalAlpha = 1; }
+  // the annex cube
+  body(c, () => { c.beginPath(); c.rect(x + 71, b - 10, 6, 10); }, col, 0.8);
+  body(c, () => { c.beginPath(); c.rect(x + 60, b - 36, 28, 26); }, col, 0.9);
+  const cols = [MV.red, MV.yellow, MV.teal, '#b04dff', MV.pink, MV.blue, MV.green, MV.glow];
+  seed = 77; for (let j = 0; j < 5; j++) for (let i = 0; i < 5; i++) { c.fillStyle = cols[Math.floor(rnd() * cols.length)]; c.globalAlpha = 0.7; c.fillRect(x + 61.5 + i * 5.2, b - 34.5 + j * 4.7, 4.3, 3.9); } c.globalAlpha = 1;
+}
+
+// ---- Miami-Dade County Courthouse (1928): the neoclassical wedding cake — colonnaded base, tall shaft, setbacks,
+//      the pyramid roof on top
+function courthouse(c, x, b) {
+  const col = MV.silver, cx = x + 30;
+  body(c, () => { c.beginPath(); c.rect(x, b - 22, 60, 22); }, col, 0.9);
+  c.fillStyle = rgba(col, 0.12); c.fillRect(x + 0.6, b - 21.4, 58.8, 20.8);
+  trim(c, () => { c.beginPath(); for (let i = 4; i < 60; i += 5) { c.moveTo(x + i, b - 19); c.lineTo(x + i, b - 3); } c.moveTo(x - 1, b - 19); c.lineTo(x + 61, b - 19); c.moveTo(x - 1, b - 3); c.lineTo(x + 61, b - 3); }, col, 0.6);
+  const shaft = [[36, 70], [26, 10], [18, 8]]; let y = b - 22;
+  for (const [sw, sh] of shaft) { y -= sh; body(c, () => { c.beginPath(); c.rect(cx - sw / 2, y, sw, sh); }, col, 0.9); c.fillStyle = rgba(col, 0.12); c.fillRect(cx - sw / 2 + 0.6, y + 0.6, sw - 1.2, sh - 1.2); wins(c, cx - sw / 2, y, sw, sh, 3.6, 3.4, 4, MV.yellow, 0.5, 1.4); }
+  lit(c, () => { c.beginPath(); c.moveTo(cx - 9, y); c.lineTo(cx, y - 14); c.lineTo(cx + 9, y); c.closePath(); }, MV.yellow, 0.25, 0.9);
+  trim(c, () => { c.beginPath(); c.moveTo(cx, y - 14); c.lineTo(cx, y - 19); }, MV.white, 0.8);
+  beacon(c, cx, y - 20, 1);
+}
+
+// ---- Ocean Drive: four art-deco fronts side by side — the Colony with its blue vertical neon, the Breakwater with
+//      the central fin, the Carlyle's three fins and rounded corner, the yellow Leslie — palms along the sidewalk
+function oceanDrive(c, x, b) {
+  const deco = (bx, bw, bh, col, fillA) => { body(c, () => rr(c, bx, b - bh, bw, bh, 2), col, 0.9); c.fillStyle = rgba(col, fillA || 0.12); c.fillRect(bx + 0.6, b - bh + 0.6, bw - 1.2, bh - 1.2); };
+  const eyebrows = (bx, bw, col, rows) => trim(c, () => { c.beginPath(); for (const yy of rows) { c.moveTo(bx + 3, yy); c.lineTo(bx + bw - 3, yy); } }, col, 0.7);
+  const winRow = (bx, bw, yy, n, col) => { c.fillStyle = rgba(col, 0.45); for (let k = 0; k < n; k++) c.fillRect(bx + 3 + k * ((bw - 6) / n) + 0.8, yy, (bw - 6) / n - 1.6, 3.6); };
+  // Colony
+  let bx = x; deco(bx, 30, 32, MV.white);
+  for (const yy of [b - 28, b - 19, b - 10]) winRow(bx, 30, yy, 3, MV.blue); eyebrows(bx, 30, MV.white, [b - 29.5, b - 20.5, b - 11.5]);
+  body(c, () => { c.beginPath(); c.rect(bx + 12, b - 54, 6.4, 24); }, MV.white, 0.7);
+  neonText(c, 'COLONY', bx + 15.2, b - 50.5, 3.4, MV.blue, { vertical: true, gap: 3.55 });
+  lit(c, () => { c.beginPath(); c.rect(bx + 1, b - 7, 28, 1.6); }, MV.teal, 0.4, 0.5);
+  // Breakwater
+  bx = x + 34; body(c, () => { c.beginPath(); c.moveTo(bx, b); c.lineTo(bx, b - 26); c.lineTo(bx + 8, b - 26); c.lineTo(bx + 8, b - 34); c.lineTo(bx + 13, b - 34); c.lineTo(bx + 13, b - 66); c.lineTo(bx + 25, b - 66); c.lineTo(bx + 25, b - 34); c.lineTo(bx + 30, b - 34); c.lineTo(bx + 30, b - 26); c.lineTo(bx + 38, b - 26); c.lineTo(bx + 38, b); c.closePath(); }, MV.teal, 0.9);
+  c.fillStyle = rgba(MV.teal, 0.1); c.fillRect(bx + 0.6, b - 25.4, 36.8, 24.8); c.fillRect(bx + 13.6, b - 65.4, 10.8, 40);
+  neonText(c, 'BREAKWATER', bx + 19, b - 62.5, 3.1, MV.pink, { vertical: true, gap: 3.15 });
+  eyebrows(bx, 38, MV.teal, [b - 21, b - 14, b - 7]); for (const yy of [b - 19.5, b - 12.5]) winRow(bx, 38, yy, 5, MV.yellow);
+  trim(c, () => { c.beginPath(); c.arc(bx + 5, b - 30, 1.6, 0, Math.PI * 2); c.moveTo(bx + 34.6, b - 30); c.arc(bx + 33, b - 30, 1.6, 0, Math.PI * 2); }, MV.pink, 0.6);
+  // Carlyle
+  bx = x + 76; body(c, () => { c.beginPath(); c.moveTo(bx, b); c.lineTo(bx, b - 32); c.lineTo(bx + 26, b - 32); c.quadraticCurveTo(bx + 34, b - 32, bx + 34, b - 24); c.lineTo(bx + 34, b); c.closePath(); }, MV.lav, 0.9);
+  c.fillStyle = rgba(MV.lav, 0.12); c.fillRect(bx + 0.6, b - 31.4, 30, 30.8);
+  trim(c, () => { c.beginPath(); for (const fx of [bx + 9, bx + 15, bx + 21]) { c.moveTo(fx, b - 34); c.lineTo(fx, b - 4); } }, MV.lav, 1);
+  for (const yy of [b - 28, b - 19, b - 10]) winRow(bx, 34, yy, 4, MV.pink);
+  neonText(c, 'CARLYLE', bx + 17, b - 35.5, 3, MV.pink);
+  // Leslie
+  bx = x + 114; body(c, () => { c.beginPath(); c.moveTo(bx, b); c.lineTo(bx, b - 28); c.lineTo(bx + 6, b - 28); c.lineTo(bx + 6, b - 31); c.lineTo(bx + 20, b - 31); c.lineTo(bx + 20, b - 28); c.lineTo(bx + 26, b - 28); c.lineTo(bx + 26, b); c.closePath(); }, MV.yellow, 0.9);
+  c.fillStyle = rgba(MV.yellow, 0.14); c.fillRect(bx + 0.6, b - 27.4, 24.8, 26.8);
+  eyebrows(bx, 26, MV.blue, [b - 24, b - 15]); for (const yy of [b - 22.5, b - 13.5]) winRow(bx, 26, yy, 3, MV.blue);
+  neonText(c, 'LESLIE', bx + 13, b - 29.5, 2.6, MV.blue);
+  // sidewalk palms
+  miniPalm(c, x + 32, b + 1, 30, -2, 6); miniPalm(c, x + 73, b + 1, 26, 2, 6); miniPalm(c, x + 111, b + 1, 28, -3, 6);
+}
+
+// ---- Port of Miami: the gantry cranes and a cruise ship alongside
+function port(c, x, wl) {
+  for (const cx of [x, x + 34]) {
+    trim(c, () => { c.beginPath(); c.moveTo(cx, wl); c.lineTo(cx, wl - 60); c.moveTo(cx + 10, wl); c.lineTo(cx + 10, wl - 60); c.moveTo(cx - 2, wl - 60); c.lineTo(cx + 12, wl - 60); c.moveTo(cx - 22, wl - 52); c.lineTo(cx + 18, wl - 52); c.moveTo(cx - 22, wl - 52); c.lineTo(cx + 2, wl - 66); c.lineTo(cx + 18, wl - 52); c.moveTo(cx, wl - 30); c.lineTo(cx + 10, wl - 30); c.moveTo(cx, wl - 12); c.lineTo(cx + 10, wl - 12); }, MV.blue, 0.8);
+    beacon(c, cx + 2, wl - 67, 0.9);
+  }
+  // cruise ship
+  const sx = x + 60, L = 150;
+  body(c, () => { c.beginPath(); c.moveTo(sx, wl + 2); c.lineTo(sx + 6, wl - 12); c.lineTo(sx + L - 4, wl - 12); c.lineTo(sx + L, wl + 2); c.closePath(); }, MV.white, 0.9);
+  body(c, () => { c.beginPath(); c.moveTo(sx + 14, wl - 12); c.lineTo(sx + 16, wl - 30); c.lineTo(sx + L - 16, wl - 30); c.lineTo(sx + L - 8, wl - 12); c.closePath(); }, MV.white, 0.8);
+  c.fillStyle = rgba(MV.white, 0.12); c.fillRect(sx + 16, wl - 29, L - 32, 16);
+  for (let d = 0; d < 4; d++) for (let i = 0; i < 30; i++) { c.fillStyle = MV.yellow; c.globalAlpha = 0.6; c.fillRect(sx + 20 + i * 4.2, wl - 28 + d * 4.2, 2.2, 1.6); } c.globalAlpha = 1;
+  c.fillStyle = rgba(MV.blue, 0.4); c.fillRect(sx + 10, wl - 9, L - 20, 1.2);
+  body(c, () => { c.beginPath(); c.moveTo(sx + 96, wl - 30); c.lineTo(sx + 100, wl - 42); c.lineTo(sx + 114, wl - 42); c.lineTo(sx + 112, wl - 30); c.closePath(); }, MV.red, 0.8);
+  c.fillStyle = rgba(MV.red, 0.4); c.fillRect(sx + 100.5, wl - 41.5, 12.5, 11);
+  trim(c, () => { c.beginPath(); c.moveTo(sx + 40, wl - 30); c.lineTo(sx + 40, wl - 40); c.moveTo(sx + 36, wl - 40); c.lineTo(sx + 44, wl - 40); }, MV.white, 0.6);
+  beacon(c, sx + 40, wl - 41, 0.8);
+}
+
+// ---- Miami Marine Stadium (1963, Virginia Key): the folded-plate concrete roof cantilevered over the grandstand,
+//      out over the water
+function marineStadium(c, x, wl) {
+  const W = 110, col = MV.silver;
+  body(c, () => { c.beginPath(); c.moveTo(x, wl); c.lineTo(x, wl - 8); c.lineTo(x + W, wl - 26); c.lineTo(x + W, wl); c.closePath(); }, col, 0.8);
+  trim(c, () => { c.beginPath(); for (let k = 1; k < 8; k++) { const xx = x + k * W / 8; c.moveTo(xx, wl - 8 - 18 * k / 8); c.lineTo(xx, wl); } }, col, 0.4, true);
+  trim(c, () => { c.beginPath(); for (let k = 0; k < 6; k++) { const xx = x + W - 8 - k * 18; c.moveTo(xx, wl - 8 - 18 * (xx - x) / W); c.lineTo(xx, wl - 42); } }, col, 0.7);
+  lit(c, () => { c.beginPath(); c.moveTo(x - 6, wl - 40); for (let k = 0; k <= 8; k++) c.lineTo(x - 6 + k * (W + 12) / 8, wl - 44 - (k % 2 ? 0 : 6)); c.lineTo(x + W + 6, wl - 41); c.lineTo(x + W + 6, wl - 38); for (let k = 8; k >= 0; k--) c.lineTo(x - 6 + k * (W + 12) / 8, wl - 41 - (k % 2 ? 0 : 6)); c.closePath(); }, MV.lav, 0.3, 0.9);
+  c.fillStyle = rgba(MV.pink, 0.5); for (let i = 0; i < 12; i++) c.fillRect(x + 6 + i * 8.5, wl - 12 - i * 1.4, 4, 1.2);
+}
+
+// ---- Cape Florida Lighthouse (Key Biscayne, 1825): white tapered brick tower, black lantern, the keeper's cottage
+function lighthouse(c, x, b) {
+  const col = MV.white, cx = x + 8;
+  body(c, () => { c.beginPath(); c.moveTo(x, b); c.lineTo(x + 3.5, b - 62); c.lineTo(x + 12.5, b - 62); c.lineTo(x + 16, b); c.closePath(); }, col, 1);
+  cylShade(c, x + 0.6, b - 61.4, 14.8, 60.8, col, 0.45);
+  c.fillStyle = MV.ink; c.globalAlpha = 0.8; for (const yy of [b - 14, b - 30, b - 46]) c.fillRect(cx - 0.8, yy, 1.6, 3); c.globalAlpha = 1;
+  body(c, () => { c.beginPath(); c.rect(x + 1.5, b - 65, 13, 3); }, col, 0.6);
+  body(c, () => { c.beginPath(); c.rect(x + 4, b - 73, 8, 8); }, MV.silver, 0.7);
+  lit(c, () => { c.beginPath(); c.rect(x + 5, b - 72, 6, 6); }, MV.yellow, 0.7, 0.6);
+  accent(c, () => { c.beginPath(); c.moveTo(x + 3, b - 73); c.lineTo(cx, b - 78); c.lineTo(x + 13, b - 73); c.closePath(); }, MV.ink);
+  c.beginPath(); c.moveTo(x + 3, b - 73); c.lineTo(cx, b - 78); c.lineTo(x + 13, b - 73); glowStroke(c, MV.silver, 0.6, 2.5, 0.3);
+  if (BK) BK.light = { x: x + 11, y: b - 69 };
+  body(c, () => { c.beginPath(); c.rect(x + 20, b - 12, 22, 12); }, col, 0.8);
+  body(c, () => { c.beginPath(); c.moveTo(x + 18, b - 12); c.lineTo(x + 31, b - 19); c.lineTo(x + 44, b - 12); c.closePath(); }, col, 0.7);
+  c.fillStyle = rgba(MV.yellow, 0.5); c.fillRect(x + 24, b - 9, 3.5, 4); c.fillRect(x + 34, b - 9, 3.5, 4);
+}
+
+// ---- Stiltsville: the wooden houses standing on pilings out in the bay
+function stiltsville(c, x, wl) {
+  for (const [hx, hw, roofUp] of [[x, 26, 7], [x + 40, 20, 6]]) {
+    trim(c, () => { c.beginPath(); for (let k = 0; k < 5; k++) { const px = hx + 2 + k * ((hw - 4) / 4); c.moveTo(px, wl + 2); c.lineTo(px, wl - 14); } c.moveTo(hx, wl - 14); c.lineTo(hx + hw, wl - 14); }, MV.silver, 0.6);
+    body(c, () => { c.beginPath(); c.rect(hx + 1, wl - 26, hw - 2, 12); }, MV.amber, 0.8);
+    c.fillStyle = rgba(MV.amber, 0.12); c.fillRect(hx + 1.6, wl - 25.4, hw - 3.2, 10.8);
+    body(c, () => { c.beginPath(); c.moveTo(hx - 2, wl - 26); c.lineTo(hx + hw / 2, wl - 26 - roofUp); c.lineTo(hx + hw + 2, wl - 26); c.closePath(); }, MV.amber, 0.7);
+    c.fillStyle = rgba(MV.yellow, 0.6); c.fillRect(hx + 5, wl - 23, 3.5, 4); c.fillRect(hx + hw - 9, wl - 23, 3.5, 4);
+    trim(c, () => { c.beginPath(); c.moveTo(hx - 3, wl - 14); c.lineTo(hx + hw + 3, wl - 14); c.moveTo(hx - 3, wl - 17.5); c.lineTo(hx + hw + 3, wl - 17.5); for (let k = 0; k < 9; k++) { const px = hx - 3 + k * ((hw + 6) / 8); c.moveTo(px, wl - 17.5); c.lineTo(px, wl - 14); } }, MV.silver, 0.4, true);
+  }
+}
+
+// ---- offshore powerboat (near layer, crossing the bay): long low hull, raked windshield, rooster tail
+function speedboat(c, x, wl) {
+  const L = 46;
+  c.fillStyle = rgba(MV.white, 0.35); c.beginPath(); c.moveTo(x - 4, wl + 1); c.quadraticCurveTo(x - 14, wl - 8, x - 24, wl - 14); c.lineTo(x - 20, wl - 2); c.quadraticCurveTo(x - 12, wl - 1, x - 4, wl + 2); c.closePath(); c.fill();
+  c.fillStyle = rgba(MV.teal, 0.5); c.beginPath(); c.moveTo(x - 6, wl + 1); c.quadraticCurveTo(x - 12, wl - 4, x - 18, wl - 8); c.lineTo(x - 14, wl); c.closePath(); c.fill();
+  body(c, () => { c.beginPath(); c.moveTo(x, wl + 1.5); c.lineTo(x + 1.5, wl - 4.5); c.lineTo(x + L - 16, wl - 8); c.lineTo(x + L, wl - 7); c.lineTo(x + L - 6, wl - 1); c.closePath(); }, MV.white, 0.9);
+  c.fillStyle = rgba(MV.white, 0.22); c.beginPath(); c.moveTo(x + 2.5, wl - 3.5); c.lineTo(x + L - 16, wl - 7); c.lineTo(x + L - 8, wl - 6); c.lineTo(x + L - 8, wl - 1.5); c.lineTo(x + 2.5, wl); c.closePath(); c.fill();
+  trim(c, () => { c.beginPath(); c.moveTo(x + 2, wl - 1.2); c.lineTo(x + L - 8, wl - 3.6); }, MV.pink, 0.7);
+  body(c, () => { c.beginPath(); c.moveTo(x + 9, wl - 5.4); c.lineTo(x + 12, wl - 10); c.lineTo(x + 23, wl - 10.5); c.lineTo(x + 26, wl - 6.6); c.closePath(); }, MV.teal, 0.7);
+  c.fillStyle = rgba(MV.teal, 0.3); c.fillRect(x + 12.5, wl - 9.6, 10, 3.2);
+  beacon(c, x + 4, wl - 5.6, 0.7); dot(c, x + L - 4, wl - 8, 0.7, MV.green);
+}
+
+// ---- South Beach lifeguard tower (near layer) — approved, unchanged
+function lifeguard(c, x, b, stripe) {
+  c.strokeStyle = MV.lav; c.lineWidth = 1.2; c.beginPath();
+  for (const lx of [x + 3, x + 8, x + 16, x + 21]) { c.moveTo(lx, b); c.lineTo(lx, b - 14); }
+  c.moveTo(x + 3, b - 8); c.lineTo(x + 21, b - 8); c.stroke();
+  rr(c, x, b - 28, 24, 14, 2); c.fillStyle = '#120a2e'; c.fill(); glowStroke(c, stripe, 1, 4, 0.28);
+  c.fillStyle = stripe; c.globalAlpha = 0.5; c.fillRect(x + 2, b - 26, 20, 3); c.fillRect(x + 2, b - 18, 20, 2); c.globalAlpha = 1;
+  c.fillStyle = '#120a2e'; c.beginPath(); c.moveTo(x - 4, b - 28); c.lineTo(x + 30, b - 28); c.lineTo(x + 26, b - 35); c.lineTo(x - 2, b - 35); c.closePath(); c.fill();
+  c.strokeStyle = stripe; c.lineWidth = 1; c.stroke();
+  c.fillStyle = MV.teal; c.fillRect(x + 8, b - 25, 8, 6);
+}
+// ---- Jose Gasparilla (Tampa's pirate ship) — approved, unchanged
+function pirateShip(c, x, wl) {
+  const W = 64, sil = '#120a2e';
+  const neonS = (path, col) => { path(); c.fillStyle = sil; c.fill(); glowStroke(c, col, 1, 4, 0.28); };
+  neonS(() => { c.beginPath(); c.moveTo(x, wl - 12); c.quadraticCurveTo(x + W * 0.45, wl + 9, x + W, wl - 10); c.lineTo(x + W - 4, wl - 24); c.lineTo(x + W - 12, wl - 24); c.lineTo(x + W - 12, wl - 14); c.lineTo(x + 4, wl - 14); c.closePath(); }, MV.pink);
+  c.strokeStyle = MV.pink; c.lineWidth = 1; c.beginPath(); c.moveTo(x + 2, wl - 14); c.lineTo(x - 14, wl - 22); c.stroke();
+  for (const [mx, mh] of [[x + 16, 38], [x + 32, 48], [x + 47, 34]]) {
+    c.beginPath(); c.moveTo(mx, wl - 14); c.lineTo(mx, wl - 14 - mh); c.stroke();
+    const sail = (y, wTop, wBot, h) => neonS(() => { c.beginPath(); c.moveTo(mx - wTop / 2, y); c.lineTo(mx + wTop / 2, y); c.lineTo(mx + wBot / 2, y + h); c.lineTo(mx - wBot / 2, y + h); c.closePath(); }, MV.lav);
+    sail(wl - 14 - mh + 5, 12, 16, 9); sail(wl - 14 - mh + 17, 16, 20, 11);
+  }
+  c.fillStyle = MV.red; c.beginPath(); c.moveTo(x + 32, wl - 62); c.lineTo(x + 43, wl - 59); c.lineTo(x + 32, wl - 56); c.closePath(); c.fill();
+  c.fillStyle = '#fff'; c.fillRect(x + 35, wl - 60, 2, 2);
+}
+
+
+// ---- flying flamingo, facing right. s = size (1 = about 28 px wingspan), flap = -1 (wings up) .. 1 (wings down)
+function flamingo(c, x, y, s, flap, col) {
+  col = col || MV.pink; const ink = MV.ink;
+  c.save(); c.translate(x, y); c.scale(s, s); c.lineCap = 'round'; c.lineJoin = 'round';
+  const u = (flap + 1) / 2, tip = { x: -3 - 5 * (1 - flap * flap) - 3 * Math.max(0, flap), y: -12 + 19 * Math.pow(u, 1.4) };
+  const wing = (sh, tp, back, dark) => {
+    const mx = (sh.x + tp.x) / 2, my = (sh.y + tp.y) / 2, dx = tp.x - sh.x, dy = tp.y - sh.y, n = Math.hypot(dx, dy) || 1, px = -dy / n, py = dx / n;
+    c.beginPath(); c.moveTo(sh.x, sh.y); c.quadraticCurveTo(mx + px * 1.6, my + py * 1.6, tp.x, tp.y); c.quadraticCurveTo((back.x + tp.x) / 2 - px * 1.4, (back.y + tp.y) / 2 - py * 1.4, back.x, back.y); c.closePath();
+    c.fillStyle = rgba(col, dark ? 0.5 : 0.9); c.fill(); c.strokeStyle = col; c.lineWidth = 0.35; c.stroke();
+    const q = (p, t) => ({ x: p.x + (tp.x - p.x) * t, y: p.y + (tp.y - p.y) * t }), a = q(sh, 0.6), b = q(back, 0.6);
+    c.beginPath(); c.moveTo(a.x, a.y); c.quadraticCurveTo(a.x + (tp.x - a.x) * 0.5 + px * 0.8, a.y + (tp.y - a.y) * 0.5 + py * 0.8, tp.x, tp.y); c.lineTo(b.x, b.y); c.closePath(); c.fillStyle = ink; c.globalAlpha = dark ? 0.7 : 0.95; c.fill(); c.globalAlpha = 1;
+  };
+  c.globalAlpha = 0.25; c.strokeStyle = col; c.lineWidth = 3; c.beginPath(); c.ellipse(1, -0.5, 7, 3, -0.1, 0, Math.PI * 2); c.stroke(); c.globalAlpha = 1;
+  wing({ x: 0.8, y: -0.3 }, { x: tip.x + 2, y: tip.y * 0.45 + 1.5 }, { x: -3.6, y: 0.8 }, true);
+  c.strokeStyle = col; c.lineWidth = 0.6; c.beginPath(); c.moveTo(-4.4, 0.8); c.lineTo(-14.5, 3.6); c.moveTo(-3.8, 1.4); c.lineTo(-13.8, 4.6); c.stroke();
+  c.save(); c.rotate(-0.1); c.beginPath(); c.ellipse(0, 0, 5.4, 1.8, 0, 0, Math.PI * 2); c.fillStyle = rgba(col, 0.92); c.fill(); c.restore();
+  wing({ x: -0.6, y: -1.1 }, tip, { x: -4.6, y: 0.2 }, false);
+  c.beginPath(); c.moveTo(4.6, -0.5); c.quadraticCurveTo(9.5, -3.6, 13.6, -3.6); c.strokeStyle = col; c.lineWidth = 1.2; c.stroke();
+  c.beginPath(); c.arc(14.2, -3.4, 1.25, 0, Math.PI * 2); c.fillStyle = col; c.fill();
+  c.beginPath(); c.moveTo(15.2, -3.3); c.quadraticCurveTo(16.9, -3.1, 16.6, -1.2); c.strokeStyle = col; c.lineWidth = 0.9; c.stroke();
+  c.beginPath(); c.moveTo(16.85, -2.1); c.lineTo(16.6, -1.2); c.strokeStyle = ink; c.lineWidth = 1; c.stroke();
+  c.fillStyle = ink; c.beginPath(); c.arc(14.5, -3.7, 0.3, 0, Math.PI * 2); c.fill();
+  c.restore();
+}
+function flamingoV(c, x, y, s, ph, col) {
+  [[0, 0], [-16, 7], [-32, 14], [16, 7], [32, 14]].forEach(([dx, dy], i) => flamingo(c, x + dx * s, y + dy * s, s, Math.sin(ph + i * 1.3), col));
+}
+// ---- standing flamingo (near layer / shoreline), facing left; one leg tucked, S-curved neck
+function flamingoStanding(c, x, b, s, col) {
+  col = col || MV.pink; const ink = MV.ink;
+  c.save(); c.translate(x, b); c.scale(s, s); c.lineCap = 'round';
+  c.strokeStyle = col; c.lineWidth = 0.8; c.beginPath(); c.moveTo(0.5, -11); c.lineTo(0.8, -5.5); c.lineTo(0.2, 0); c.moveTo(-1.2, -11); c.lineTo(-2.6, -7.5); c.stroke();
+  c.beginPath(); c.ellipse(0, -14, 5.4, 3, 0.15, 0, Math.PI * 2); c.fillStyle = rgba(col, 0.75); c.fill(); glowStroke(c, col, 0.8, 3.5, 0.3);
+  c.beginPath(); c.moveTo(-3.5, -15); c.quadraticCurveTo(-8, -16, -8.2, -19); c.stroke();
+  c.beginPath(); c.moveTo(4.5, -12.5); c.quadraticCurveTo(-6, -14, -5, -22); c.quadraticCurveTo(-4, -26.5, -1, -29); glowStroke(c, col, 1.3, 4, 0.3);
+  c.beginPath(); c.arc(-0.5, -29.6, 1.35, 0, Math.PI * 2); c.fillStyle = col; c.fill();
+  c.beginPath(); c.moveTo(-1.6, -29.9); c.quadraticCurveTo(-4, -30, -3.6, -27.4); c.strokeStyle = col; c.lineWidth = 0.9; c.stroke();
+  c.beginPath(); c.moveTo(-3.9, -28.4); c.lineTo(-3.6, -27.4); c.strokeStyle = ink; c.lineWidth = 1; c.stroke();
+  c.fillStyle = ink; c.beginPath(); c.arc(-0.9, -30, 0.32, 0, Math.PI * 2); c.fill();
+  c.restore();
+}
+
+
+
+// ---------- the world: one loop of scenery, in "far layer" units ----------
+// The skyline scrolls at CITY_P of the course speed. Water props scroll a little faster, the near layer faster still,
+// so each layer's loop is the same world stretched by (its speed / CITY_P) — that keeps the streetcar next to Ybor and
+// the lifeguard towers next to Ocean Drive no matter how far you fly.
+let BK = null;   // while the strips are baked, beacons and other animated bits register themselves here
+function beacon(c, x, y, r) { accent(c, () => { c.beginPath(); c.arc(x, y, r, 0, Math.PI * 2); }, MV.red); if (BK) BK.beacons.push({ x, y, r }); }
+// everything in the far strip, drawn with its world x and the horizon at y = 0 (water things sit 6 below it)
+function cityFar(c) {
+  skyway(c, 40, 8);
+  amalie(c, 440, 0);
+  rivergate(c, 590, 0); parkTower(c, 626, 0); oneTampa(c, 668, 0); boaPlaza(c, 708, 0); northTampa(c, 758, 0); truist(c, 812, 0); element(c, 856, 0);
+  tampaTheatre(c, 680, 2);
+  plantHall(c, 920, 0); sulphur(c, 1080, 0); centroYbor(c, 1130, 0);
+  stiltsville(c, 1480, 6);
+  lighthouse(c, 1760, 0); marineStadium(c, 1830, 6); port(c, 1980, 6);
+  courthouse(c, 2230, 0); freedomTower(c, 2298, 0); miamiTower(c, 2362, 0); southeast(c, 2426, 0); thousandMuseum(c, 2478, 0); atlantis(c, 2522, 0); bacardi(c, 2660, 0);
+  oceanDrive(c, 2790, 2);
+}
+// live props: [world x, draw(c, screenX, baseline)]
+const CITY_WATER = [[250, (c, x, wl) => pirateShip(c, x, wl)], [3150, (c, x, wl) => speedboat(c, x, wl)]];
+const CITY_NEAR = [[1195, (c, x, b) => streetcar(c, x, b)], [2860, (c, x, b) => lifeguard(c, x, b, MV.pink)], [3080, (c, x, b) => lifeguard(c, x, b, MV.teal)],
+  [1460, (c, x, b) => { flamingoStanding(c, x, b - 2, 1.3); flamingoStanding(c, x + 22, b, 1.15); }], [3260, (c, x, b) => { flamingoStanding(c, x, b, 1.2); flamingoStanding(c, x + 18, b - 3, 1.35); }]];
+const CITY_SKY = [[1520, 130], [3200, 118]];   // flamingo flocks: world x, height above the horizon
+
+// Bake the far strip once: three segments so no single canvas gets too wide for a phone, at device resolution.
+function buildCityCache() {
+  const k = Math.min(scale, 3) * CITY_S, segW = 1200, segs = [];   // k = device pixels per art unit
+  // pass 1: run the drawing on a scrap canvas just to collect the animated bits' positions
+  BK = { beacons: [], tiers: [] };
+  const scrap = document.createElement('canvas'); scrap.width = scrap.height = 8;
+  const sc = scrap.getContext('2d'); sc.translate(0, CITY_BASE); cityFar(sc);
+  const reg = BK; BK = null;
+  // pass 2: the real strips
+  for (let x0 = 0; x0 < CITY_LOOP / CITY_S; x0 += segW) {
+    const w = Math.min(segW, CITY_LOOP / CITY_S - x0), cv = document.createElement('canvas');
+    cv.width = Math.ceil(w * k); cv.height = Math.ceil(CITY_H * k);
+    const c = cv.getContext('2d'); c.scale(k, k); c.translate(-x0, CITY_BASE); c.lineJoin = 'round'; c.lineCap = 'round';
+    // anything hanging over the segment edge is drawn again by the neighbour, so overlaps are harmless
+    cityFar(c);
+    segs.push({ c: cv, x0: x0 * CITY_S, w: w * CITY_S });   // placement in game units
+  }
+  cityCache = { segs, k, reg };
+}
+// screen x for a world x on a layer that moves at `p` of the course speed (wraps around the loop)
+function loopX(worldX, p) { const r = p / CITY_P, span = CITY_LOOP * r; let sx = ((worldX - fc) * r) % span; if (sx < -span / 2) sx += span; if (sx > span / 2) sx -= span; return sx; }
+function synthCity(hz) {
+  if (!cityCache) buildCityCache();
+  const { segs } = cityCache;
+  const kx = segs[0].c.width / segs[0].w;   // strip pixels per game unit
+  for (const seg of segs) for (const rep of [-1, 0, 1]) {
+    const sx = seg.x0 - fc + rep * CITY_LOOP;
+    if (sx > W || sx + seg.w < 0) continue;
+    // copy only the part of the segment that is actually on screen — blitting is the one cost that scales with area
+    const a = Math.max(0, -sx), b = Math.min(seg.w, W - sx);
+    ctx.drawImage(seg.c, a * kx, 0, (b - a) * kx, seg.c.height, sx + a, hz - CITY_BASE * CITY_S, b - a, CITY_H * CITY_S);
+  }
+}
+// the bits that blink, chase and cycle, drawn live over the baked strip
+function synthCityLive(hz) {
+  const { reg } = cityCache, S = CITY_S, W_ = W / S, sx = (wx) => loopX(wx * S, CITY_P) / S;   // art units
+  ctx.save(); ctx.translate(0, hz); ctx.scale(S, S);
+  reg.beacons.forEach((b, i) => { const x = sx(b.x); if (x < -10 || x > W_ + 10) return; const on = (t * 1.1 + i * 0.41) % 1 < 0.55; ctx.fillStyle = on ? '#ff5f7e' : 'rgba(255,60,90,0.25)'; ctx.beginPath(); ctx.arc(x, b.y, b.r + (on ? 0.6 : 0), 0, Math.PI * 2); ctx.fill(); if (on) { ctx.globalAlpha = 0.28; ctx.beginPath(); ctx.arc(x, b.y, b.r + 3, 0, Math.PI * 2); ctx.fill(); ctx.globalAlpha = 1; } });
+  const m = reg.marquee;
+  if (m) { const x0 = sx(m.x0), x1 = x0 + (m.x1 - m.x0); if (x1 > -10 && x0 < W_ + 10) { const ph = Math.floor(t * 9); ctx.fillStyle = MV.yellow; for (let k = 0, xx = x0; xx <= x1; k++, xx += 1.5) { const on = (k + ph) % 3 === 0; ctx.globalAlpha = on ? 1 : 0.3; ctx.fillRect(xx - 0.5, m.y1 - 0.5, 1, 1); ctx.fillRect(xx - 0.5, m.y2 - 0.5, 1, 1); } ctx.globalAlpha = 1; } }
+  const tr = reg.truist;
+  if (tr) { const x0 = sx(tr.x0); if (x0 > -60 && x0 < W_ + 60) { const dx = x0 - tr.x0; ctx.beginPath(); ctx.moveTo(tr.x0 + dx, tr.y); ctx.lineTo(tr.cx + dx, tr.y - 16); ctx.lineTo(tr.x1 + dx, tr.y); ctx.closePath(); ctx.fillStyle = `hsla(${(t * 18) % 360},100%,65%,0.38)`; ctx.fill(); } }
+  reg.tiers.forEach((tier, i) => { const x = sx(tier.left); if (x < -80 || x > W_ + 80) return; ctx.fillStyle = `hsla(${(t * 14 + i * 110) % 360},100%,62%,0.22)`; ctx.fillRect(x + 0.6, tier.y + 0.6, tier.w - 1.2, tier.h - 1.2); });
+  const lt = reg.light;
+  if (lt) { const x = sx(lt.x); if (x > -80 && x < W_ + 80) { const a = Math.max(0, Math.sin(t * 2.2)) * 0.22; if (a > 0.01) { ctx.fillStyle = `rgba(255,224,102,${a})`; ctx.beginPath(); ctx.moveTo(x, lt.y); ctx.lineTo(x + 52, lt.y - 16); ctx.lineTo(x + 52, lt.y + 14); ctx.closePath(); ctx.fill(); } } }
+  for (const [wx, up] of CITY_SKY) { const x = sx(wx); if (x < -60 || x > W_ + 60) continue; flamingoV(ctx, x, -up + Math.sin(t * 0.8 + wx) * 4, 0.9, t * 6 + wx); }
+  ctx.restore();
+}
+function synthWater(hz) {
+  if (!waterGrad) { waterGrad = ctx.createLinearGradient(0, hz, 0, GY); waterGrad.addColorStop(0, MV.water0); waterGrad.addColorStop(1, MV.water1); }
+  ctx.fillStyle = waterGrad; ctx.fillRect(0, hz + 2, W, GY - hz - 2);
+}
+function synthGlints(hz) {
+  // drifting glints: a fixed set of streaks that slide with the water layer, brighter under the sun
+  const sunX = W * 0.64, span = 600, off = (fc * (WATER_P / CITY_P)) % span;
+  seed = 13;
+  for (let i = 0; i < 70; i++) {
+    const yy = hz + 4 + rnd() * (GY - hz - 8), len = 4 + rnd() * 14; let xx = (rnd() * span - off) % span; if (xx < 0) xx += span; xx -= 60;
+    if (xx > W + 20) continue;
+    const ns = Math.abs(xx - sunX) < 70; ctx.fillStyle = ns ? MV.glow : (rnd() < 0.5 ? MV.pink : MV.teal); ctx.globalAlpha = ns ? 0.7 : 0.35; ctx.fillRect(xx, yy, len, 1);
+  }
+  ctx.globalAlpha = 1;
+}
+function synthWaterProps(hz) {
+  for (const [wx, fn] of CITY_WATER) { const x = loopX(wx * CITY_S, WATER_P); if (x < -160 || x > W + 160) continue; ctx.save(); ctx.translate(x, GY - 14 + Math.sin(t * 1.4 + wx) * 1.2); ctx.scale(CITY_S, CITY_S); fn(ctx, 0, 0); ctx.restore(); }
+}
+function synthNearProps() {
+  for (const [wx, fn] of CITY_NEAR) { const x = loopX(wx * CITY_S, NEAR_P); if (x < -120 || x > W + 120) continue; fn(ctx, x, GY + 2); }
+}
+function synthHaze(hz) {
+  const key = (state === 'play' ? 'p' : 'r') + hz;
+  if (hazeFor !== key) { hazeGrad = ctx.createLinearGradient(0, hz - 80, 0, hz + 2); hazeGrad.addColorStop(0, 'rgba(176,32,124,0)'); hazeGrad.addColorStop(1, `rgba(176,32,124,${state === 'play' ? 0.3 : 0.16})`); hazeFor = key; }
+  ctx.fillStyle = hazeGrad; ctx.fillRect(0, hz - 80, W, 82);
+}
+
 function renderSynth() {
   ctx.setTransform(scale, 0, 0, scale, 0, 0);
   ctx.clearRect(0, 0, W, H);
   ctx.save();
   ctx.translate((Math.random() - 0.5) * shake, (Math.random() - 0.5) * shake);
+  const hz = GY - HZ_UP;               // the horizon: skyline baseline, water below it
   synthSky();
   synthSun();
-  synthRidge(f1, GY - 6);
-  for (const rep of [0, 1]) { const x = -f1 + 420 + rep * FAR.span; if (x > -90 && x < W + 90) synthTower(x, GY - 6); }
+  synthWater(hz);
+  synthCity(hz);                        // Tampa, the bay, Miami: one long baked strip, slowest layer
+  synthHaze(hz);
+  synthCityLive(hz);                    // beacons, marquee chase, colour cycling, flamingos
+  synthGlints(hz);
+  synthWaterProps(hz);                  // Gasparilla and the powerboat, bobbing
+  synthNearProps();                     // streetcar, lifeguard towers, shoreline flamingos
   synthPalms(f2, GY + 2);
   for (const n of nets) synthNet(n);
   drawFiber(ctx, 1);

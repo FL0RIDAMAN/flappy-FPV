@@ -13,6 +13,7 @@ Works in any modern browser. On a phone, add it to your home screen and it runs 
 - Every net you clear is a point. The course speeds up and the gaps tighten as you go.
 - Your best score is saved on the device.
 - Rumor has it the start screen is hiding something. Try poking at the title.
+- Whatever you find back there scrolls through one long loop of Tampa Bay and Miami. Every run drops you in somewhere different — see how many landmarks you can spot.
 
 ## Add it to your home screen
 
