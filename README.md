@@ -12,6 +12,7 @@ Works in any modern browser. On a phone, add it to your home screen and it runs 
 - **Desktop:** `space` (or click) to flap, `p` to pause, `m` to toggle sound.
 - Every net you clear is a point. The course speeds up and the gaps tighten as you go.
 - Your best score is saved on the device.
+- Rumor has it the start screen is hiding something. Try poking at the title.
 
 ## Add it to your home screen
 
@@ -25,7 +26,7 @@ Works in any modern browser. On a phone, add it to your home screen and it runs 
 | `index.html` | The whole game: page, styles, and all the JavaScript in one file. |
 | `manifest.webmanifest` | Tells phones how to install the game as an app (name, icon, full-screen, portrait). |
 | `sw.js` | Service worker: keeps a cached copy of the files so the game opens offline. |
-| `icon.png` | 180×180 icon iPhones use for the home screen. |
+| `icon.png` | 180×180 pixel-art icon iPhones use for the home screen. |
 | `icon-192.png`, `icon-512.png` | Icons Android uses. |
 | `icon-maskable-512.png` | Android "maskable" icon, with padding so it can be cropped to a circle. |
 
