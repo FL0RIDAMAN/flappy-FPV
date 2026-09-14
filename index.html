@@ -66,12 +66,9 @@ const PX = 2;                      // pixel theme: one sprite pixel = PX game un
 // ---------- theme ----------
 // 'pixel'  : 8-bit sprite art, rendered on a low-res buffer and blown up with no smoothing
 // 'synth'  : 80s synthwave — neon wireframe drone, striped sun, grid floor, palms
-const THEME_KEY = 'flappy-fpv-theme', UNLOCK_KEY = 'flappy-fpv-unlocked';
-let theme = 'pixel', unlocked = false;
-try {
-  const v = localStorage.getItem(THEME_KEY); if (v === 'synth' || v === 'pixel') theme = v;
-  unlocked = localStorage.getItem(UNLOCK_KEY) === '1' || theme === 'synth';
-} catch (e) {}
+const UNLOCK_KEY = 'flappy-fpv-unlocked';
+let theme = 'pixel', unlocked = false;   // every launch starts in pixel art; synthwave is switched on per session
+try { unlocked = localStorage.getItem(UNLOCK_KEY) === '1'; localStorage.removeItem('flappy-fpv-theme'); } catch (e) {}
 let banner = '', bannerT = 0;          // "SYNTHWAVE MODE" flash after the secret is used
 let titleTaps = 0, titleTapT = 0, titleWobble = 0;   // the secret: five quick taps on the title
 function applyTheme() {
@@ -79,10 +76,7 @@ function applyTheme() {
   themeBtn.hidden = !unlocked;
   stage.style.background = theme === 'pixel' ? '#1b2b4d' : '#0d0322';
 }
-function setTheme(v) {
-  theme = v; applyTheme();
-  try { localStorage.setItem(THEME_KEY, v); } catch (e) {}
-}
+function setTheme(v) { theme = v; applyTheme(); }
 function unlock() {
   unlocked = true;
   try { localStorage.setItem(UNLOCK_KEY, '1'); } catch (e) {}
@@ -93,15 +87,14 @@ function secretToggle() {
   unlock();
   setTheme(theme === 'pixel' ? 'synth' : 'pixel');
   banner = theme === 'synth' ? 'SYNTHWAVE MODE' : 'PIXEL MODE'; bannerT = 2.2;
-  const seq = theme === 'synth' ? [440, 554, 659, 880] : [880, 659, 554, 440];
-  seq.forEach((f, i) => setTimeout(() => tone(f, 0.12, 'square', 0.04), i * 70));
+  SFX.unlock(theme === 'synth');
 }
 function titleHit(gx, gy) { return state === 'ready' && Math.abs(gx - W / 2) < 150 && gy > H * 0.15 - 16 && gy < H * 0.15 + 56; }
 function titleTap() {
   const now = performance.now();
   if (now - titleTapT > 1200) titleTaps = 0;
   titleTapT = now; titleTaps++; titleWobble = 1;
-  tone(660 + titleTaps * 60, 0.05, 'square', 0.03);
+  SFX.titleTap(titleTaps);
   if (titleTaps >= 5) { titleTaps = 0; secretToggle(); }
 }
 themeBtn.addEventListener('click', () => { setTheme(theme === 'pixel' ? 'synth' : 'pixel'); canvas.focus({ preventScroll: true }); });
@@ -182,6 +175,115 @@ sndBtn.addEventListener('click', () => {
   canvas.focus({ preventScroll: true });
 });
 
+
+// ---------- synthwave sound kit ----------
+// Everything is synthesized on the fly with the Web Audio API — no sound files to download.
+// The 80s vocabulary: LinnDrum-style kick and snare, the snare through a GATED REVERB (a big room
+// that slams shut), 808 handclap and cowbell, Simmons electronic toms with the pitch drop,
+// detuned-saw brass stabs, an arcade laser zap, and a tape-stop power-down for the crash.
+let noiseBuffer = null, verbBuffer = null, master = null;
+function bus(a) { if (!master) { master = a.createGain(); master.gain.value = 0.7; master.connect(a.destination); } return master; }
+function noiseBuf(a) {
+  if (!noiseBuffer) { const n = a.sampleRate; noiseBuffer = a.createBuffer(1, n, a.sampleRate); const d = noiseBuffer.getChannelData(0); for (let i = 0; i < n; i++) d[i] = Math.random() * 2 - 1; }
+  return noiseBuffer;
+}
+function verbBuf(a) {   // impulse response of a big bright room: half a second of decaying noise
+  if (!verbBuffer) { const len = Math.floor(a.sampleRate * 0.5); verbBuffer = a.createBuffer(2, len, a.sampleRate); for (let ch = 0; ch < 2; ch++) { const d = verbBuffer.getChannelData(ch); for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 2.2); } }
+  return verbBuffer;
+}
+function sNoise(a, t0, dur, vol, ftype, freq, q) {   // filtered noise burst with an exponential decay; returns its gain node
+  const src = a.createBufferSource(); src.buffer = noiseBuf(a);
+  const f = a.createBiquadFilter(); f.type = ftype || 'bandpass'; f.frequency.value = freq || 1500; if (q) f.Q.value = q;
+  const g = a.createGain(); g.gain.setValueAtTime(vol, t0); g.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
+  src.connect(f).connect(g).connect(bus(a)); src.start(t0); src.stop(t0 + dur + 0.02);
+  return g;
+}
+function gated(a, t0, hold, vol) {   // the gated reverb: feed it a sound; the room holds for `hold` seconds then cuts dead
+  const c = a.createConvolver(); c.buffer = verbBuf(a);
+  const g = a.createGain(); g.gain.setValueAtTime(vol, t0); g.gain.setValueAtTime(vol, t0 + hold); g.gain.linearRampToValueAtTime(0.0001, t0 + hold + 0.02);
+  c.connect(g).connect(bus(a));
+  return c;
+}
+function sKick(a, t0, vol) {
+  const o = a.createOscillator(), g = a.createGain();
+  o.type = 'sine'; o.frequency.setValueAtTime(165, t0); o.frequency.exponentialRampToValueAtTime(48, t0 + 0.11);
+  g.gain.setValueAtTime(vol, t0); g.gain.exponentialRampToValueAtTime(0.001, t0 + 0.32);
+  o.connect(g).connect(bus(a)); o.start(t0); o.stop(t0 + 0.35);
+  sNoise(a, t0, 0.006, vol * 0.5, 'highpass', 2500);
+}
+function sSnare(a, t0, vol) {   // snare body + noise, both also sent through the gate
+  const gate = gated(a, t0, 0.17, 1.3);
+  const o = a.createOscillator(), og = a.createGain();
+  o.type = 'triangle'; o.frequency.setValueAtTime(210, t0); o.frequency.exponentialRampToValueAtTime(140, t0 + 0.06);
+  og.gain.setValueAtTime(vol, t0); og.gain.exponentialRampToValueAtTime(0.001, t0 + 0.14);
+  o.connect(og); og.connect(bus(a)); og.connect(gate); o.start(t0); o.stop(t0 + 0.16);
+  const n = sNoise(a, t0, 0.2, vol * 1.1, 'bandpass', 1800, 0.6); n.connect(gate);
+}
+function sClap(a, t0, vol) {    // four quick slaps then a tail, through the gate
+  const gate = gated(a, t0, 0.14, 1.6);
+  for (let i = 0; i < 4; i++) sNoise(a, t0 + i * 0.011, 0.014, vol, 'bandpass', 1300, 0.9).connect(gate);
+  sNoise(a, t0 + 0.04, 0.22, vol * 0.9, 'bandpass', 1200, 0.7).connect(gate);
+}
+function sCowbell(a, t0, vol) {
+  const f = a.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = 700; f.Q.value = 1.4;
+  const g = a.createGain(); g.gain.setValueAtTime(vol, t0); g.gain.exponentialRampToValueAtTime(0.001, t0 + 0.28);
+  for (const fr of [540, 800]) { const o = a.createOscillator(); o.type = 'square'; o.frequency.value = fr; o.connect(f); o.start(t0); o.stop(t0 + 0.3); }
+  f.connect(g).connect(bus(a));
+}
+function sTom(a, t0, f0, vol) { // Simmons-style electronic tom: sine with a fast pitch drop and a click
+  const o = a.createOscillator(), g = a.createGain();
+  o.type = 'sine'; o.frequency.setValueAtTime(f0, t0); o.frequency.exponentialRampToValueAtTime(f0 * 0.35, t0 + 0.22);
+  g.gain.setValueAtTime(vol, t0); g.gain.exponentialRampToValueAtTime(0.001, t0 + 0.3);
+  o.connect(g).connect(bus(a)); o.start(t0); o.stop(t0 + 0.32);
+  sNoise(a, t0, 0.02, vol * 0.45, 'highpass', 1500);
+}
+function sStab(a, t0, notes, vol, dur) {   // detuned-saw brass stab with a closing filter
+  const f = a.createBiquadFilter(); f.type = 'lowpass'; f.frequency.setValueAtTime(3200, t0); f.frequency.exponentialRampToValueAtTime(350, t0 + dur);
+  const g = a.createGain(); g.gain.setValueAtTime(0.0001, t0); g.gain.linearRampToValueAtTime(vol, t0 + 0.012); g.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
+  for (const n of notes) for (const det of [-7, 7]) { const o = a.createOscillator(); o.type = 'sawtooth'; o.frequency.value = n; o.detune.value = det; o.connect(f); o.start(t0); o.stop(t0 + dur + 0.02); }
+  f.connect(g).connect(bus(a));
+}
+function sZap(a, t0, vol) {
+  const o = a.createOscillator(), g = a.createGain();
+  o.type = 'square'; o.frequency.setValueAtTime(1900, t0); o.frequency.exponentialRampToValueAtTime(140, t0 + 0.22);
+  g.gain.setValueAtTime(vol, t0); g.gain.exponentialRampToValueAtTime(0.001, t0 + 0.25);
+  o.connect(g).connect(bus(a)); o.start(t0); o.stop(t0 + 0.27);
+}
+function sTapeStop(a, t0, vol) {   // power-down: a saw chord slides down while the filter closes
+  const f = a.createBiquadFilter(); f.type = 'lowpass'; f.frequency.setValueAtTime(2500, t0); f.frequency.exponentialRampToValueAtTime(120, t0 + 0.7);
+  const g = a.createGain(); g.gain.setValueAtTime(vol, t0); g.gain.exponentialRampToValueAtTime(0.001, t0 + 0.75);
+  for (const n of [220, 277, 330]) { const o = a.createOscillator(); o.type = 'sawtooth'; o.frequency.setValueAtTime(n, t0); o.frequency.exponentialRampToValueAtTime(n / 2.8, t0 + 0.7); o.connect(f); o.start(t0); o.stop(t0 + 0.77); }
+  f.connect(g).connect(bus(a));
+}
+function sHat(a, t0, vol) { sNoise(a, t0, 0.05, vol, 'highpass', 7000); }
+
+// One entry point per game event; each picks the chip sound (pixel) or the 80s sound (synthwave).
+function play(fn) { if (!soundOn) return; const a = ac(); if (!a) return; fn(a, a.currentTime); }
+const SFX = {
+  flap() { if (theme === 'synth') play((a, t) => sTom(a, t, 300, 0.2)); else tone(480, 0.09, 'square', 0.035, 760); },
+  arm() { if (theme === 'synth') play((a, t) => { sKick(a, t, 0.5); sStab(a, t, [220, 261.6, 329.6], 0.11, 0.35); }); else tone(880, 0.05, 'square', 0.04); },
+  score(n) {
+    if (theme === 'synth') play((a, t) => { sClap(a, t, 1.0); if (n % 5 === 0) sCowbell(a, t + 0.03, 0.22); });
+    else { tone(1200, 0.05, 'square', 0.04); setTimeout(() => tone(1600, 0.07, 'square', 0.04), 60); }
+  },
+  crash() {
+    if (theme === 'synth') play((a, t) => { sSnare(a, t, 0.5); sNoise(a, t, 0.7, 0.5, 'lowpass', 500); sZap(a, t + 0.02, 0.1); sTapeStop(a, t + 0.08, 0.12); });
+    else { noise(0.7, 0.35); tone(160, 0.6, 'sawtooth', 0.07, 30); }
+  },
+  panel(isBest) {   // when the LINK LOST panel appears: a tom fill, plus cowbell + stab for a new best
+    if (theme !== 'synth') return;
+    play((a, t) => {
+      sTom(a, t, 420, 0.28); sTom(a, t + 0.14, 300, 0.3); sTom(a, t + 0.28, 200, 0.34);
+      if (isBest) { sCowbell(a, t + 0.5, 0.22); sCowbell(a, t + 0.65, 0.22); sStab(a, t + 0.8, [261.6, 329.6, 392, 523.3], 0.12, 0.6); }
+    });
+  },
+  unlock(on) {      // the secret sting: into synthwave = zap + rising brass arpeggio; back to pixel = chip arpeggio
+    if (on) play((a, t) => { sZap(a, t, 0.1); [220, 277, 330, 440].forEach((n, i) => sStab(a, t + 0.1 + i * 0.11, [n, n * 1.5], 0.1, 0.3)); sSnare(a, t + 0.55, 0.4); });
+    else [880, 659, 554, 440].forEach((f, i) => setTimeout(() => tone(f, 0.12, 'square', 0.04), i * 70));
+  },
+  titleTap(n) { if (theme === 'synth') play((a, t) => sHat(a, t, 0.55)); else tone(660 + n * 60, 0.05, 'square', 0.03); },
+};
+
 // ---------- world generation (deterministic) ----------
 function rng(seed) {
   return () => {
@@ -214,6 +316,7 @@ function saveBest(v) { try { localStorage.setItem(BEST_KEY, String(v)); } catch 
 
 // state: 'ready' (title screen) -> 'play' -> 'dead' (crash screen); 'paused' sits between play frames
 let state = 'ready', score = 0, best = loadBest(), newBest = false, t = 0;
+let readyGrace = 0;   // seconds left during which the menu ignores arm taps (so a crash-screen tap can't start a new round)
 let D, nets, fiber, parts, dist, speed, gap, gOff, gScroll, f1, f2, cause, deadT, flash, shake, bat, fly;
 
 function mkNet(x) {
@@ -243,13 +346,13 @@ window.addEventListener('orientationchange', () => setTimeout(layout, 250));
 if (window.visualViewport) window.visualViewport.addEventListener('resize', layout);
 
 // ---------- input ----------
-function flap() { D.vy = FLAP; D.ang = -0.5; tone(480, 0.09, 'square', 0.035, 760); }
+function flap() { D.vy = FLAP; D.ang = -0.5; SFX.flap(); }
 function pause() { if (state === 'play') state = 'paused'; }
 function command() {
-  if (state === 'ready') { state = 'play'; tone(880, 0.05, 'square', 0.04); flap(); }
+  if (state === 'ready') { if (readyGrace > 0) return; state = 'play'; SFX.arm(); flap(); }
   else if (state === 'play') flap();
   else if (state === 'paused') { state = 'play'; flap(); }  // resuming also flaps so you get a fighting chance
-  else if (state === 'dead' && deadT > 0.7) { reset(); state = 'ready'; }
+  else if (state === 'dead' && deadT > 0.7) { reset(); state = 'ready'; readyGrace = 0.8; }
 }
 window.addEventListener('keydown', e => {
   if (e.code === 'Space' || e.key === ' ' || e.key === 'Spacebar') { e.preventDefault(); if (!e.repeat) command(); }
@@ -310,13 +413,14 @@ function die(why) {
   newBest = score > best;
   if (newBest) { best = score; saveBest(best); }
   boom(D.x, D.y);
-  noise(0.7, 0.35); tone(160, 0.6, 'sawtooth', 0.07, 30);
+  SFX.crash();
   try { if (navigator.vibrate) navigator.vibrate([70, 40, 140]); } catch (e) {}  // Android only; iOS ignores it
 }
 
 function update(dt) {
   t += dt;
   if (bannerT > 0) bannerT -= dt;
+  if (readyGrace > 0) readyGrace -= dt;
   titleWobble *= Math.pow(0.02, dt);
   if (state === 'paused') return;  // freeze the world; t keeps ticking so the props spin and text blinks
   if (state !== 'dead') {
@@ -342,7 +446,7 @@ function update(dt) {
         n.passed = true; score++;
         speed = SPEED0 + Math.min(score * 2.5, 80);
         gap = Math.max(GAP_MIN, GAP0 - score * 1.6);
-        tone(1200, 0.05, 'square', 0.04); setTimeout(() => tone(1600, 0.07, 'square', 0.04), 60);
+        SFX.score(score);
       }
     }
     const pts = hitPts();
@@ -355,7 +459,8 @@ function update(dt) {
     }
     if (state === 'play') for (const p of pts) if (p.y + p.r >= GY) { die('TERRAIN IMPACT'); break; }
   } else {
-    deadT += dt;
+    const before = deadT; deadT += dt;
+    if (before < 0.5 && deadT >= 0.5) SFX.panel(newBest);   // the crash panel slides in
   }
   if (state !== 'dead') { const a = attach(); fiber.push({ x: a.x, y: a.y }); }
   for (const p of fiber) if (p.y < GY - 3) p.y = Math.min(GY - 3, p.y + 38 * dt);
@@ -630,9 +735,11 @@ function synthOSD() {
     chromeTitle('FLAPPY FPV', W / 2 + wob, H * 0.15, 40);
     stxt('fiber-optic one-way attack drone', W / 2, H * 0.15 + 52, 13, 'center', SY.dim);
     if (best > 0) stxt(`best  ${best}`, W / 2, H * 0.15 + 76, 13, 'center', SY.cyan);
-    stxt(KEY, W / 2, H * 0.66, 20, 'center', blink ? SY.cyan : '#ffffff', '500');
-    stxt(TOUCH ? 'interface command — tap to arm' : 'interface command — press to arm', W / 2, H * 0.66 + 30, 12, 'center', SY.dim);
-    if (!TOUCH) stxt('click or tap works too', W / 2, H * 0.66 + 48, 11, 'center', SY.dim);
+    if (readyGrace <= 0) {
+      stxt(KEY, W / 2, H * 0.66, 20, 'center', blink ? SY.cyan : '#ffffff', '500');
+      stxt(TOUCH ? 'interface command — tap to arm' : 'interface command — press to arm', W / 2, H * 0.66 + 30, 12, 'center', SY.dim);
+      if (!TOUCH) stxt('click or tap works too', W / 2, H * 0.66 + 48, 11, 'center', SY.dim);
+    }
   }
   if (bannerT > 0) { ctx.globalAlpha = Math.min(1, bannerT / 0.5); stxt(banner, W / 2, H * 0.31, 24, 'center', SY.cyan, '500'); ctx.globalAlpha = 1; }
   if (state === 'dead' && deadT > 0.5) {
@@ -884,9 +991,11 @@ function pixelOSD() {
     ptextShadow('FLAPPY FPV', W / 2 + wob, H * 0.15, 3, 'center', '#ffffff');
     ptextShadow('FIBER-OPTIC ONE-WAY ATTACK DRONE', W / 2, H * 0.15 + 56, 1, 'center', PXC.dim);
     if (best > 0) ptextShadow(`BEST ${best}`, W / 2, H * 0.15 + 80, 1, 'center', PXC.gold);
-    ptextShadow(KEY, W / 2, H * 0.66, 2, 'center', blink ? PXC.gold : '#ffffff');
-    ptextShadow(TOUCH ? 'INTERFACE COMMAND - TAP TO ARM' : 'INTERFACE COMMAND - PRESS TO ARM', W / 2, H * 0.66 + 36, 1, 'center', PXC.dim);
-    if (!TOUCH) ptextShadow('CLICK OR TAP WORKS TOO', W / 2, H * 0.66 + 56, 1, 'center', PXC.dim);
+    if (readyGrace <= 0) {
+      ptextShadow(KEY, W / 2, H * 0.66, 2, 'center', blink ? PXC.gold : '#ffffff');
+      ptextShadow(TOUCH ? 'INTERFACE COMMAND - TAP TO ARM' : 'INTERFACE COMMAND - PRESS TO ARM', W / 2, H * 0.66 + 36, 1, 'center', PXC.dim);
+      if (!TOUCH) ptextShadow('CLICK OR TAP WORKS TOO', W / 2, H * 0.66 + 56, 1, 'center', PXC.dim);
+    }
   }
   if (bannerT > 0 && (bannerT > 0.5 || Math.floor(bannerT * 8) % 2 === 0)) ptextShadow(banner, W / 2, H * 0.31, 2, 'center', PXC.gold);
   if (state === 'dead' && deadT > 0.5) {
