@@ -8,7 +8,7 @@
 // cache; the cache is only used when the network fails (offline) or takes too long. That way you
 // always see the newest version after you push an update, and never get stuck on a stale one.
 
-const CACHE = 'flappy-fpv-v1';
+const CACHE = 'flappy-fpv-v2';
 const ASSETS = [
   './',
   './index.html',
@@ -37,10 +37,14 @@ self.addEventListener('activate', event => {
   );
 });
 
+// cache: 'no-cache' makes the browser re-check with GitHub every time instead of trusting its own
+// HTTP cache (GitHub tells browsers a file is good for 10 minutes, which is exactly how long an
+// update would otherwise appear to be "missing"). GitHub answers "not modified" cheaply when
+// nothing changed, so this costs almost nothing.
 function fetchWithTimeout(request, ms) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('network timeout')), ms);
-    fetch(request).then(res => { clearTimeout(timer); resolve(res); }, err => { clearTimeout(timer); reject(err); });
+    fetch(request, { cache: 'no-cache' }).then(res => { clearTimeout(timer); resolve(res); }, err => { clearTimeout(timer); reject(err); });
   });
 }
 

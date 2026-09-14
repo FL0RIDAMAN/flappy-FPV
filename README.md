@@ -32,6 +32,6 @@ Works in any modern browser. On a phone, add it to your home screen and it runs 
 
 ## Making changes
 
-Edit `index.html`, commit, and push. GitHub Pages republishes automatically, usually within a minute or two. GitHub also tells browsers they may keep a copy for up to 10 minutes, so if your phone still shows the old version, wait a bit and reload (on a home-screen install, close it fully and reopen).
+Edit `index.html`, commit, and push. GitHub Pages republishes automatically, usually within a minute or two. The game's service worker re-checks GitHub for changes every time it opens, so on a phone: close the game fully, reopen it (that fetches the update in the background), then close and reopen once more to run it.
 
 The game is plain HTML, CSS, and JavaScript with no build step and no dependencies, so you can also just open `index.html` straight from your computer to try changes before pushing.
