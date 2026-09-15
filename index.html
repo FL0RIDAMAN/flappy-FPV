@@ -30,6 +30,7 @@
   #bar kbd { font: inherit; color: #e6ecf5; border: 1px solid #3a4452; border-bottom-width: 2px; border-radius: 4px; padding: 1px 6px; }
   #bar button { font: inherit; color: #cfd6e0; background: transparent; border: 1px solid #3a4452; border-radius: 4px; padding: 5px 10px; cursor: pointer; }
   #bar button:hover { background: #161a21; }
+  @media (max-width: 400px) { #bar { gap: 8px; padding: 0 8px; } #bar button { padding: 5px 8px; } }   /* narrow phones: keep the bar on one line */
   .touch-only { display: none; }
   @media (pointer: coarse) { .touch-only { display: inline; } .kb-only { display: none; } }
 </style>
@@ -72,7 +73,7 @@ try { unlocked = localStorage.getItem(UNLOCK_KEY) === '1'; localStorage.removeIt
 let banner = '', bannerT = 0;          // "SYNTHWAVE MODE" flash after the secret is used
 let titleTaps = 0, titleTapT = 0, titleWobble = 0;   // the secret: five quick taps on the title
 function applyTheme() {
-  themeBtn.textContent = theme === 'pixel' ? 'theme: pixel' : 'theme: synthwave';
+  themeBtn.textContent = theme === 'pixel' ? 'theme: pixel' : 'theme: synth';
   themeBtn.hidden = !unlocked;
   stage.style.background = theme === 'pixel' ? '#1b2b4d' : '#0d0322';
 }
@@ -327,9 +328,14 @@ let state = 'ready', score = 0, best = loadBest(), newBest = false, t = 0;
 let readyGrace = 0;   // seconds left during which the menu ignores arm taps (so a crash-screen tap can't start a new round)
 let D, nets, fiber, parts, dist, speed, gap, gOff, gScroll, f1, f2, fc, cause, deadT, flash, shake, bat, fly;
 
+// Gaps are placed inside a band that is the same height on every screen (the height a desktop window gets), centred
+// on the drone's start altitude. Taller phone screens used to spread the gaps over three times the vertical range,
+// which made the same course far harder on a phone; the extra height is now just sky and ground.
+const COURSE_BAND = H_MIN - GROUND_H - 2 * 52;
 function mkNet(x) {
-  const m = 52;
-  return { x, gapY: m + Math.random() * (GY - 2 * m - gap), gapH: gap, passed: false };
+  const m = 52, band = Math.min(GY - 2 * m, COURSE_BAND);
+  const top = Math.max(m, Math.min(GY - m - band, H * 0.44 - band / 2));
+  return { x, gapY: top + Math.random() * (band - gap), gapH: gap, passed: false };
 }
 function reset() {
   D = { x: DX, y: H * 0.44, vy: 0, ang: 0 };
